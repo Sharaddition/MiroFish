@@ -50,7 +50,8 @@ def test_prompt_is_identical_for_every_agent():
         '```\n{"q1": 70}\n```',
         'Sure! Here you go: {"q1": 70} Hope that helps.',
         '<think>hmm, maybe {"q1": 1}</think>{"q1": 70}',
-        '﻿{"q1": 70}',
+        '<thought>maybe {"q1": 1}</thought>```json\n{"q1": 70}\n```',
+        '{"q1": 70}',
         'Text before ```json\n{"q1": 70}\n``` text after',
     ],
 )

@@ -64,10 +64,17 @@ def _is_response_format_unsupported(error: Exception) -> bool:
     )
 
 
+# Models write their reasoning inline in different tags (DeepSeek/Qwen use
+# <think>, Gemma uses <thought>); the answer follows the closing tag.
+_REASONING_BLOCK = re.compile(
+    r'<(think|thinking|thought)>[\s\S]*?</\1>', re.IGNORECASE
+)
+
+
 def _clean_chat_text(content: str) -> str:
     """Remove common reasoning wrappers and an outer Markdown JSON fence."""
 
-    cleaned = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+    cleaned = _REASONING_BLOCK.sub('', content).strip()
     cleaned = cleaned.lstrip("\ufeff")
     cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r'\n?```\s*$', '', cleaned)

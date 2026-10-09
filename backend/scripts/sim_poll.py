@@ -64,7 +64,7 @@ def extract_json_object(raw: Optional[str]) -> Optional[Dict[str, Any]]:
     """
     if not raw:
         return None
-    text = re.sub(r"<think>[\s\S]*?</think>", "", str(raw)).lstrip("﻿").strip()
+    text = re.sub(r"<(think|thinking|thought)>[\s\S]*?</\1>", "", str(raw), flags=re.IGNORECASE).lstrip("﻿").strip()
     candidates: List[str] = []
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
     if fenced:
