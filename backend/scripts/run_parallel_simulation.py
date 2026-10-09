@@ -1323,14 +1323,24 @@ async def _run_platform_simulation(
             consecutive_step_failures += 1
             log_info(f"第 {round_num + 1} 轮 env.step 失败 ({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES}): {error}")
             if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES:
+                try:
+                    await result.env.close()  # the platform is giving up; release its database
+                except Exception:
+                    pass
                 raise
         finally:
             round_failures = failure_tracker.end_round()
         if step_error is not None:
+            # The whole step failed, so every woken agent that did not already
+            # report its own failure counts once (never more than were woken).
             kind, message = sim_runtime.classify_error(step_error)
-            if action_logger:
-                action_logger.log_agent_error(round_num + 1, None, kind, message)
-            round_failures = round_failures + [{"agent_id": None, "kind": kind, "message": message}]
+            already_failed = {failure["agent_id"] for failure in round_failures}
+            for agent_id in active_agent_ids:
+                if agent_id in already_failed:
+                    continue
+                if action_logger:
+                    action_logger.log_agent_error(round_num + 1, agent_id, kind, message)
+                round_failures.append({"agent_id": agent_id, "kind": kind, "message": message})
         if round_failures:
             log_info(
                 f"第 {round_num + 1} 轮: {len(round_failures)}/{len(active_agents)} 个Agent的模型调用失败 "
@@ -1552,12 +1562,26 @@ async def main():
             config, simulation_dir, reddit_logger, log_manager, max_rounds, seed, run_settings)
     else:
         # 并行运行（每个平台使用独立的日志记录器和独立的、由种子派生的随机数发生器）
+        # return_exceptions: when one platform dies, the other still finishes
+        # its own loop, and both environments are closed before the error is
+        # raised (so no database stays locked and no task is left behind).
         results = await asyncio.gather(
             run_twitter_simulation(
                 config, simulation_dir, twitter_logger, log_manager, max_rounds, seed, run_settings),
             run_reddit_simulation(
                 config, simulation_dir, reddit_logger, log_manager, max_rounds, seed, run_settings),
+            return_exceptions=True,
         )
+        platform_errors = [r for r in results if isinstance(r, BaseException)]
+        if platform_errors:
+            for finished in results:
+                env = getattr(finished, "env", None)
+                if env is not None and not isinstance(finished, BaseException):
+                    try:
+                        await env.close()
+                    except Exception:
+                        pass
+            raise platform_errors[0]
         twitter_result, reddit_result = results
     
     total_elapsed = (datetime.now() - start_time).total_seconds()

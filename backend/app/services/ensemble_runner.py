@@ -553,10 +553,11 @@ class EnsembleManager:
 
     @classmethod
     def _final_status(cls, ensemble: Dict[str, Any]) -> str:
-        """completed (all ok) / partial (>= 2 ok) / failed (fewer than 2 ok)."""
+        """completed (all ok) / partial (>= 2 ok) / failed (fewer than 2 ok; a single-run ensemble needs its one run)."""
         replicates = ensemble["replicates"]
         ok = sum(1 for r in replicates if r["status"] == "completed")
-        if ok < MIN_REPLICATES_TO_AGGREGATE:
+        # An ensemble of one run needs that one run; larger ones need two.
+        if ok < min(MIN_REPLICATES_TO_AGGREGATE, len(replicates)):
             return "failed"
         return "completed" if ok == len(replicates) else "partial"
 

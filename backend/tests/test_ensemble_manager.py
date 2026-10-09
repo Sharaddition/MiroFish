@@ -520,6 +520,18 @@ def test_failed_replicates_do_not_fail_the_ensemble_unless_fewer_than_two_succee
         assert "fewer than 2" in final["error"]
 
 
+@pytest.mark.parametrize("failures,expected_status", [({}, "completed"), ({1: RunnerStatus.FAILED}, "failed")])
+def test_an_ensemble_of_one_run_needs_that_run(env, monkeypatch, failures, expected_status):
+    monkeypatch.setattr(er, "build_summary", lambda ens, q, sims: {"n": 1})
+    monkeypatch.setattr(er, "write_summary", lambda path, summary: open(os.path.join(path, "summary.json"), "w").write("{}"))
+
+    ensemble = create(env, n_replicates=1, concurrency=1)
+    EnsembleManager.start(ensemble["ensemble_id"])
+    drive(env, ensemble["ensemble_id"], failures)
+
+    assert EnsembleManager._load(ensemble["ensemble_id"])["status"] == expected_status
+
+
 def test_a_replicate_that_cannot_start_is_failed_and_the_rest_continue(env):
     ensemble = create(env, n_replicates=3, concurrency=1)
     env.runner.fail_start.add(rid(ensemble, 2))
