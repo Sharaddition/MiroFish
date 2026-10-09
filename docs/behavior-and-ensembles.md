@@ -72,6 +72,11 @@ because Reddit consumed a random number.
 **What a seed guarantees:** the same seed gives the same *schedule* - who is woken in which round, reaction delays,
 the starting follow graph and when scheduled events fire.
 
+You can check this from the logs: every `round_start` record in a run's `actions.jsonl` lists the agents that were
+woken that round (`active_agent_ids`), so two runs with the same seed can be compared directly. The logged *actions*
+can still differ between such runs: the model chooses what each woken agent does, and an action that fails (liking
+a post twice, for example) leaves no record.
+
 **What it does not guarantee:** identical text. The language model's output is not reproducible, so two runs with
 the same seed still differ in what the agents write, and those differences feed back into the run. Do not treat a
 seed as "replay this run".

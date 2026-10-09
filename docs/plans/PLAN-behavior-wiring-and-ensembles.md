@@ -17,7 +17,7 @@ Ship as **4 PRs** (§7). Old simulations must keep running exactly as before (ve
 
 ## 1. Verified facts (read these before writing code)
 
-All line numbers refer to the current checkout at `C:\Users\dell\Desktop\pi-test`.
+All line numbers refer to `main` as it was before this change (commit `7657031`).
 
 ### 1.1 Config that is generated but never used
 
