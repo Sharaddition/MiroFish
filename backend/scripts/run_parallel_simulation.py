@@ -171,10 +171,15 @@ try:
         generate_twitter_agent_graph,
         generate_reddit_agent_graph
     )
+    from oasis.social_agent.agent import SocialAgent
 except ImportError as e:
     print(f"错误: 缺少依赖 {e}")
     print("请先安装: pip install oasis-ai camel-ai")
     sys.exit(1)
+
+# OASIS swallows a failed model call (it logs it and returns the exception), so the round loop would only
+# see an agent that did nothing. Track those failures so the UI can tell the user why nothing happens.
+sim_runtime.install_failure_tracking(SocialAgent)
 
 
 # Twitter可用动作（不包含INTERVIEW，INTERVIEW只能通过ManualAction手动触发）
@@ -1245,6 +1250,7 @@ async def _run_platform_simulation(
             log_info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
 
     start_time = datetime.now()
+    failure_tracker = sim_runtime.FailureTracker()
 
     for round_num in range(total_rounds):
         # 检查是否收到退出信号
@@ -1290,11 +1296,27 @@ async def _run_platform_simulation(
         if not active_agents:
             # 没有活跃agent时也记录round结束（actions_count 仅含注入的事件）
             if action_logger:
-                action_logger.log_round_end(round_num + 1, injected_count)
+                action_logger.log_round_end(round_num + 1, injected_count, failed_count=0)
             continue
 
         actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
+        failure_tracker.begin_round(
+            active_agents,
+            on_failure=(
+                lambda failure, _round=round_num + 1: action_logger.log_agent_error(
+                    _round, failure["agent_id"], failure["kind"], failure["message"]
+                )
+            ) if action_logger else None,
+        )
+        try:
+            await result.env.step(actions)
+        finally:
+            round_failures = failure_tracker.end_round()
+        if round_failures:
+            log_info(
+                f"第 {round_num + 1} 轮: {len(round_failures)}/{len(active_agents)} 个Agent的模型调用失败 "
+                f"({round_failures[0]['kind']}: {round_failures[0]['message'][:120]})"
+            )
 
         # 从数据库获取实际执行的动作并记录
         actual_actions, last_rowid = fetch_new_actions_from_db(
@@ -1315,7 +1337,7 @@ async def _run_platform_simulation(
                 round_action_count += 1
 
         if action_logger:
-            action_logger.log_round_end(round_num + 1, round_action_count)
+            action_logger.log_round_end(round_num + 1, round_action_count, failed_count=len(round_failures))
 
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
@@ -1539,6 +1561,7 @@ async def main():
                 config,
                 poll_questions,
                 log=log_manager.info,
+                status=(twitter_logger if poll_platform == "twitter" else reddit_logger).log_poll_status,
             )
             sim_runtime.write_final_poll(simulation_dir, poll_rows)
             parsed = sum(1 for row in poll_rows if row["parse_ok"])

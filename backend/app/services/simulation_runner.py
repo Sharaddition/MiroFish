@@ -43,6 +43,10 @@ IS_WINDOWS = sys.platform == 'win32'
 # 也不会写入 Zep 记忆。定时事件（"injected"）是正常的发帖动作，照常计入。
 NON_BEHAVIOR_PHASES = frozenset({"setup", "poll"})
 
+# Health of the model calls is judged on this many of the latest rounds per platform
+HEALTH_WINDOW_ROUNDS = 3
+HEALTH_RANK = {"ok": 0, "warning": 1, "error": 2}
+
 
 class RunnerStatus(str, Enum):
     """运行器状态"""
@@ -162,6 +166,100 @@ class SimulationRunState:
     # 随机种子（让调度可复现：激活、响应延迟、关注图、定时事件；不保证LLM输出一致）
     seed: Optional[int] = None
 
+    # Live view of each platform, from the round_start / agent_error / round_end events:
+    # {"twitter": {"round": 12, "woken": 6, "failed": 2, "acted": None, "state": "running" | "done"}}
+    activity: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Model-call failures seen so far: {"total", "kinds": {kind: n}, "last": {...}, "recent": {platform: [[woken, failed], ...]}}
+    failures: Dict[str, Any] = field(default_factory=dict)
+    # Progress of the end-of-run poll (ensemble replicates), from the poll_status events
+    poll: Optional[Dict[str, Any]] = None
+
+    # --- activity and failures --------------------------------------------------------------
+
+    def _recent_rounds(self, platform: str) -> List[List[int]]:
+        recent = self.failures.setdefault("recent", {})
+        return recent.setdefault(platform, [])
+
+    def note_round_start(self, platform: str, round_num: int, woken: Optional[int]):
+        self.activity[platform] = {
+            "round": round_num, "woken": woken, "failed": 0, "acted": None, "state": "running",
+        }
+        rounds = self._recent_rounds(platform)
+        rounds.append([woken or 0, 0])
+        del rounds[:-HEALTH_WINDOW_ROUNDS]
+
+    def note_agent_error(self, platform: str, round_num: int, agent_id: Any, kind: str, message: str, timestamp: Optional[str]):
+        current = self.activity.get(platform)
+        if current is None or current.get("round") != round_num:
+            current = self.activity[platform] = {
+                "round": round_num, "woken": None, "failed": 0, "acted": None, "state": "running",
+            }
+            self._recent_rounds(platform).append([0, 0])
+        current["failed"] = current.get("failed", 0) + 1
+        rounds = self._recent_rounds(platform)
+        if rounds:
+            rounds[-1][1] += 1
+        self.failures["total"] = self.failures.get("total", 0) + 1
+        kinds = self.failures.setdefault("kinds", {})
+        kinds[kind] = kinds.get(kind, 0) + 1
+        self.failures["last"] = {
+            "kind": kind, "message": message, "agent_id": agent_id,
+            "round": round_num, "platform": platform, "timestamp": timestamp,
+        }
+
+    def note_round_end(self, platform: str, round_num: int, acted: Optional[int], failed: Optional[int]):
+        current = self.activity.get(platform)
+        if current is None or current.get("round") != round_num:
+            current = self.activity[platform] = {
+                "round": round_num, "woken": None, "failed": 0, "acted": None, "state": "running",
+            }
+        current["state"] = "done"
+        current["acted"] = acted
+        if failed is not None:
+            current["failed"] = failed
+            rounds = self._recent_rounds(platform)
+            if rounds:
+                rounds[-1][1] = failed  # the round's own count is the authoritative one
+
+    def note_poll_status(self, event: Dict[str, Any]):
+        keys = ("state", "answered", "total", "attempt", "max_attempts", "retry_in", "error_kind", "message", "timestamp")
+        self.poll = {key: event.get(key) for key in keys}
+
+    def health(self) -> Dict[str, Any]:
+        """Is the model answering? ``level`` is ok / warning / error, judged on the last few rounds (so the
+        warning goes away once the provider recovers) and on the end-of-run poll."""
+        recent = self.failures.get("recent", {})
+        woken = sum(w for rounds in recent.values() for w, _ in rounds)
+        failed = sum(f for rounds in recent.values() for _, f in rounds)
+        level = "ok"
+        if failed >= 3 and failed >= 0.5 * woken:
+            level = "error"
+        elif failed >= 2 and failed >= 0.2 * woken:
+            level = "warning"
+        last = self.failures.get("last") or {}
+        kind = last.get("kind") if level != "ok" else None
+        message = last.get("message") if level != "ok" else None
+        source = "rounds" if level != "ok" else None
+
+        # The end-of-run poll counts too: agents that could not answer, and why. It is the later event, so
+        # at equal severity it wins.
+        poll = self.poll or {}
+        if poll.get("error_kind") and (poll.get("total") or 0) > (poll.get("answered") or 0):
+            poll_level = "error" if not poll.get("answered") else "warning"
+            if HEALTH_RANK[poll_level] >= HEALTH_RANK[level]:
+                level = poll_level
+                kind, message, source = poll["error_kind"], poll.get("message"), "poll"
+
+        return {
+            "level": level,
+            "kind": kind,
+            "message": message,
+            "source": source,
+            "recent_woken": woken,
+            "recent_failed": failed,
+            "total_failed": self.failures.get("total", 0),
+        }
+
     def add_action(self, action: AgentAction):
         """添加动作到最近动作列表"""
         self.recent_actions.insert(0, action)
@@ -202,6 +300,10 @@ class SimulationRunState:
             "error": self.error,
             "process_pid": self.process_pid,
             "seed": self.seed,
+            "activity": self.activity,
+            "failures": self.failures,
+            "poll": self.poll,
+            "health": self.health(),
         }
 
     def to_detail_dict(self) -> Dict[str, Any]:
@@ -343,6 +445,9 @@ class SimulationRunner:
                 error=data.get("error"),
                 process_pid=data.get("process_pid"),
                 seed=data.get("seed"),
+                activity=data.get("activity") or {},
+                failures=data.get("failures") or {},
+                poll=data.get("poll"),
             )
 
             # 加载最近动作
@@ -974,11 +1079,39 @@ class SimulationRunner:
                                             f"{state.simulation_id}"
                                         )
                                 
+                                # 本轮开始：唤醒了多少个Agent
+                                elif event_type == "round_start":
+                                    active_ids = action_data.get("active_agent_ids")
+                                    state.note_round_start(
+                                        platform,
+                                        action_data.get("round", 0),
+                                        len(active_ids) if isinstance(active_ids, list) else None,
+                                    )
+
+                                # 某个Agent的模型调用失败（OASIS 会吞掉这类错误）
+                                elif event_type == "agent_error":
+                                    state.note_agent_error(
+                                        platform,
+                                        action_data.get("round", 0),
+                                        action_data.get("agent_id"),
+                                        str(action_data.get("error_kind") or "other"),
+                                        str(action_data.get("message") or ""),
+                                        action_data.get("timestamp"),
+                                    )
+
+                                # 最终问卷进度
+                                elif event_type == "poll_status":
+                                    state.note_poll_status(action_data)
+
                                 # 更新轮次信息（从 round_end 事件）
                                 elif event_type == "round_end":
                                     round_num = action_data.get("round", 0)
                                     simulated_hours = action_data.get("simulated_hours", 0)
-                                    
+                                    state.note_round_end(
+                                        platform, round_num,
+                                        action_data.get("actions_count"), action_data.get("failed_count"),
+                                    )
+
                                     # 更新各平台独立的轮次和时间
                                     if platform == "twitter":
                                         if round_num > state.twitter_current_round:

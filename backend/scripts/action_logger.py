@@ -92,14 +92,41 @@ class PlatformActionLogger:
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
     
-    def log_round_end(self, round_num: int, actions_count: int):
-        """记录轮次结束"""
+    def log_agent_error(self, round_num: int, agent_id: int, error_kind: str, message: str):
+        """记录某个Agent本轮的模型调用失败（OASIS 会吞掉这类错误，界面据此提示用户）"""
+        entry = {
+            "round": round_num,
+            "timestamp": datetime.now().isoformat(),
+            "event_type": "agent_error",
+            "agent_id": agent_id,
+            "error_kind": error_kind,
+            "message": message,
+        }
+
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+    def log_poll_status(self, status: Dict[str, Any]):
+        """记录最终问卷的进度（已回答人数、第几次重试、最近的错误类型）"""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "event_type": "poll_status",
+            **status,
+        }
+
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+    def log_round_end(self, round_num: int, actions_count: int, failed_count: Optional[int] = None):
+        """记录轮次结束（failed_count: 本轮模型调用失败的Agent数）"""
         entry = {
             "round": round_num,
             "timestamp": datetime.now().isoformat(),
             "event_type": "round_end",
             "actions_count": actions_count,
         }
+        if failed_count is not None:
+            entry["failed_count"] = failed_count
         
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')

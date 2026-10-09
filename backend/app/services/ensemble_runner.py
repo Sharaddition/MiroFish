@@ -691,10 +691,18 @@ class EnsembleManager:
                 replicate["current_round"] = state.current_round
                 replicate["total_rounds"] = state.total_rounds
                 replicate["runner_status"] = state.runner_status.value
+                # Live status for the UI. Read defensively: this view must never fail an ensemble listing.
+                health = getattr(state, "health", None)
+                replicate["activity"] = getattr(state, "activity", None) or {}
+                replicate["poll"] = getattr(state, "poll", None)
+                replicate["health"] = health() if callable(health) else None
             else:
                 replicate["current_round"] = 0
                 replicate["total_rounds"] = ensemble.get("max_rounds")
                 replicate["runner_status"] = None
+                replicate["activity"] = {}
+                replicate["poll"] = None
+                replicate["health"] = None
         result["progress"] = counts
         result["has_summary"] = os.path.isfile(cls._path(ensemble["ensemble_id"], "summary.json"))
         result["outcome_questions"] = cls.load_outcome_questions(ensemble["ensemble_id"])

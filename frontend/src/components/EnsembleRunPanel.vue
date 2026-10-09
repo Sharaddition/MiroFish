@@ -116,6 +116,8 @@
 
       <section class="block">
         <h3 class="block-subtitle">{{ $t('ensemble.runningTitle') }}</h3>
+        <!-- Why a run seems stuck: the model refusing requests, from the run that is working now -->
+        <RunHealthBanner v-if="isActive && workingRun" :health="workingRun.health" />
         <ul class="run-list">
           <li v-for="run in ensemble.replicates" :key="run.simulation_id" class="run-row">
             <span class="run-name">{{ $t('ensemble.runLabel', { index: run.index }) }}</span>
@@ -124,6 +126,10 @@
             <span class="run-round mono">{{ $t('ensemble.round', { current: run.current_round || 0, total: run.total_rounds || ensemble.max_rounds }) }}</span>
             <span class="run-seed mono">{{ $t('ensemble.seed', { seed: run.seed }) }}</span>
             <span v-if="run.error" class="run-error">{{ run.error }}</span>
+            <!-- What this run is doing right now (the full-width line under its row) -->
+            <div v-if="run.status === 'running'" class="run-live">
+              <RunStatusLine :activity="run.activity" :poll="run.poll" :active="true" />
+            </div>
           </li>
         </ul>
       </section>
@@ -173,6 +179,8 @@ import {
 } from '../api/simulation'
 import { generateReport } from '../api/report'
 import EnsembleSummaryTable from './EnsembleSummaryTable.vue'
+import RunHealthBanner from './RunHealthBanner.vue'
+import RunStatusLine from './RunStatusLine.vue'
 
 const props = defineProps({
   simulationId: String,
@@ -220,6 +228,8 @@ const loadingText = computed(() => (
 
 const cost = computed(() => ensemble.value?.cost_estimate || null)
 const isActive = computed(() => ACTIVE_STATUSES.includes(ensemble.value?.status))
+// The run that is working right now (the banner and the status line describe this one)
+const workingRun = computed(() => (ensemble.value?.replicates || []).find((run) => run.status === 'running'))
 const formatCount = (value) => (Number.isFinite(value) ? Math.round(value).toLocaleString() : '–')
 
 // --- progress --------------------------------------------------------------------------------
@@ -819,6 +829,16 @@ textarea.input {
 .run-name {
   width: 64px;
   font-weight: 600;
+}
+
+.run-live {
+  flex-basis: 100%;
+  padding-left: 74px;
+  margin-top: -2px;
+}
+
+.run-live :deep(.run-status) {
+  margin: 0;
 }
 
 .run-round,

@@ -109,6 +109,12 @@
       </div>
     </div>
 
+    <!-- Why nothing seems to happen: what the round is doing now, and any model failure -->
+    <div v-if="!ensembleMode && isRunActive" class="run-notices">
+      <RunHealthBanner :health="runStatus.health" />
+      <RunStatusLine :activity="runStatus.activity" :poll="runStatus.poll" :active="isRunActive" />
+    </div>
+
     <!-- Main Content: Dual Timeline -->
     <div v-if="!ensembleMode" class="main-content-area" ref="scrollContainer">
       <!-- Timeline Header -->
@@ -314,6 +320,8 @@ import {
 } from '../api/simulation'
 import { generateReport } from '../api/report'
 import EnsembleRunPanel from './EnsembleRunPanel.vue'
+import RunHealthBanner from './RunHealthBanner.vue'
+import RunStatusLine from './RunStatusLine.vue'
 
 const { t } = useI18n()
 
@@ -345,6 +353,8 @@ const isStarting = ref(false)
 const isStopping = ref(false)
 const startError = ref(null)
 const runStatus = ref({})
+// The process is working (or finishing up): the live status line and the failure banner only matter then
+const isRunActive = computed(() => ['starting', 'running'].includes(runStatus.value.runner_status))
 const allActions = ref([]) // 所有动作（增量累积）
 const actionIds = ref(new Set()) // 用于去重的动作ID集合
 const scrollContainer = ref(null)
@@ -948,6 +958,14 @@ onUnmounted(() => {
 }
 
 /* --- Main Content Area --- */
+/* The live round status and the model-failure banner, between the control bar and the timeline */
+.run-notices {
+  flex-shrink: 0;
+  padding: 14px 24px 2px;
+  background: var(--c-ffffff);
+  border-bottom: 1px solid var(--c-eaeaea);
+}
+
 .main-content-area {
   flex: 1;
   overflow-y: auto;

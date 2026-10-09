@@ -187,6 +187,12 @@ The limits are 50 runs, up to 4 runs at once (the UI uses 1 at a time) and a man
   same rules. Ensembles are not resumed automatically.
 - A run's `simulation.log` says why agents stayed silent. With "402" or "429" errors the provider is throttling or out
   of credit: run fewer rounds, or add credit, and try again.
+- The run page shows this without opening the log. A status line says what the round is doing ("Round 12: 6 agents
+  awake, 2 failed so far"; during the end-of-run questions, how many agents have answered and which retry it is on).
+  When most agents' model calls fail, a banner names the cause (no credit, rate limit, rejected key, timeouts, an
+  unreachable provider) with the provider's own message. It judges the last 3 rounds, so it disappears once the
+  provider recovers. OASIS swallows such errors, so the run scripts record them as `agent_error` events in
+  `actions.jsonl`; each `round_end` also carries `failed_count`, and the poll writes `poll_status` events.
 - Replicates are hidden from the simulation list and history; `?include_replicates=true` shows them.
 
 ### Files

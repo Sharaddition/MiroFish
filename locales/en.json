@@ -710,6 +710,39 @@
     "generateInterviewQuestionsFailed": "Failed to generate interview questions: {error}",
     "generateInterviewSummaryFailed": "Failed to generate interview summary: {error}"
   },
+  "runHealth": {
+    "titleError": "The model is not answering",
+    "titleWarning": "Some model calls are failing",
+    "counts": "{failed} of {woken} agent calls failed in the last few rounds.",
+    "countsFailedOnly": "{failed} agent calls failed in the last few rounds.",
+    "pollPrefix": "End-of-run questions: ",
+    "providerSaid": "The provider says:",
+    "kinds": {
+      "http_402": "The provider is refusing requests with HTTP 402: the account is out of credit, or each request asks for more tokens than the budget allows. Agents cannot act until this is fixed. Add credit or switch to another model, then run again.",
+      "http_429": "The provider is rate-limiting requests (HTTP 429), so agents skip turns. Use fewer agents or rounds, or a plan with a higher limit.",
+      "auth": "The provider rejected the API key (HTTP 401/403). Check LLM_API_KEY in .env and restart the backend.",
+      "http_5xx": "The provider is returning server errors (HTTP 5xx). This is usually temporary and the run recovers when it stops.",
+      "timeout": "Model requests are timing out. The model may be overloaded or too slow for this many agents.",
+      "connection": "The backend cannot reach the model provider. Check your network and LLM_BASE_URL.",
+      "other": "Agents' model calls are failing."
+    },
+    "status": {
+      "waiting": "Waiting for the first round to start...",
+      "running": "Round {round}: {woken} agents awake, {failed} failed so far",
+      "runningUnknown": "Round {round} running, {failed} failed so far",
+      "done": "Round {round}: {woken} awake, {acted} acted, {failed} failed",
+      "doneUnknown": "Round {round} done: {acted} acted, {failed} failed",
+      "nobody": "Round {round}: nobody awake",
+      "poll": "Final questions: {answered} of {total} agents answered",
+      "pollRetry": "retry {attempt} of {max} in {seconds} s",
+      "pollTry": "retry {attempt} of {max}",
+      "pollDone": "Final questions done: {answered} of {total} agents answered"
+    },
+    "platforms": {
+      "twitter": "Info Plaza",
+      "reddit": "Topic Community"
+    }
+  },
   "ensemble": {
     "title": "Ensemble run",
     "preparing": "Preparing {runs} runs...",

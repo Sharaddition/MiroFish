@@ -710,6 +710,39 @@
     "generateInterviewQuestionsFailed": "生成采访问题失败: {error}",
     "generateInterviewSummaryFailed": "生成采访摘要失败: {error}"
   },
+  "runHealth": {
+    "titleError": "模型没有响应",
+    "titleWarning": "部分模型调用失败",
+    "counts": "最近几轮中，{woken} 次 Agent 调用有 {failed} 次失败。",
+    "countsFailedOnly": "最近几轮中有 {failed} 次 Agent 调用失败。",
+    "pollPrefix": "最终问卷：",
+    "providerSaid": "服务商返回：",
+    "kinds": {
+      "http_402": "服务商以 HTTP 402 拒绝了请求：账户额度已用完，或每个请求申请的 token 超过了可用额度。在解决之前 Agent 无法行动。请充值或换一个模型，然后重新运行。",
+      "http_429": "服务商正在限流（HTTP 429），所以 Agent 会跳过回合。请减少 Agent 或轮数，或使用限额更高的套餐。",
+      "auth": "服务商拒绝了 API Key（HTTP 401/403）。请检查 .env 中的 LLM_API_KEY 并重启后端。",
+      "http_5xx": "服务商返回了服务器错误（HTTP 5xx）。通常是暂时的，恢复后运行会继续正常。",
+      "timeout": "模型请求超时。模型可能负载过高，或对这么多 Agent 来说太慢。",
+      "connection": "后端无法连接模型服务商。请检查网络和 LLM_BASE_URL。",
+      "other": "Agent 的模型调用失败。"
+    },
+    "status": {
+      "waiting": "等待第一轮开始...",
+      "running": "第 {round} 轮：{woken} 个 Agent 被唤醒，已失败 {failed} 个",
+      "runningUnknown": "第 {round} 轮进行中，已失败 {failed} 个",
+      "done": "第 {round} 轮：{woken} 个被唤醒，{acted} 个行动，{failed} 个失败",
+      "doneUnknown": "第 {round} 轮完成：{acted} 个行动，{failed} 个失败",
+      "nobody": "第 {round} 轮：没有 Agent 被唤醒",
+      "poll": "最终问卷：{total} 个 Agent 中已回答 {answered} 个",
+      "pollRetry": "{seconds} 秒后第 {attempt}/{max} 次重试",
+      "pollTry": "第 {attempt}/{max} 次重试",
+      "pollDone": "最终问卷完成：{total} 个 Agent 中已回答 {answered} 个"
+    },
+    "platforms": {
+      "twitter": "信息广场",
+      "reddit": "话题社区"
+    }
+  },
   "ensemble": {
     "title": "集合运行",
     "preparing": "正在准备 {runs} 次运行...",

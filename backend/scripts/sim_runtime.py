@@ -14,10 +14,12 @@ stack installed.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
+import re
 import sqlite3
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 #: Seconds to wait before each retry of the agents that gave no reply to the final poll. A provider
 #: that throttles ("402: retry after in-flight requests settle", "429") needs the pause: retrying at
@@ -96,6 +98,116 @@ def read_interview_result(
             result["response"] = info_json
         result["timestamp"] = created_at
     return result
+
+
+# --- model-call failures: what OASIS swallows --------------------------------
+
+ERROR_MESSAGE_LIMIT = 240
+_STATUS_RE = re.compile(r"Error code:\s*(\d{3})|\bHTTP\s*(\d{3})\b|status[_ ]code[:= ]+(\d{3})", re.I)
+
+
+def classify_error(error: Any) -> Tuple[str, str]:
+    """``(kind, short message)`` for a failed model call (an exception or its text).
+
+    Kinds: ``http_402`` (no credit / token budget), ``http_429`` (rate limit), ``auth`` (401/403, key
+    rejected), ``http_5xx`` (provider error), ``timeout``, ``connection`` and ``other``. The UI turns the
+    kind into advice; the message is the provider's own words, shortened.
+    """
+    text = " ".join(str(error).split())
+    message = text[:ERROR_MESSAGE_LIMIT]
+    status = getattr(error, "status_code", None)
+    if not isinstance(status, int):
+        match = _STATUS_RE.search(text)
+        status = int(next(group for group in match.groups() if group)) if match else None
+
+    if status == 402:
+        return "http_402", message
+    if status == 429:
+        return "http_429", message
+    if status in (401, 403):
+        return "auth", message
+    if status == 408:
+        return "timeout", message
+    if status is not None and status >= 500:
+        return "http_5xx", message
+    name = type(error).__name__.lower() if isinstance(error, BaseException) else ""
+    lowered = text.lower()
+    if "timeout" in name or "timed out" in lowered or "timeout" in lowered:
+        return "timeout", message
+    if "connection" in name or "connect" in lowered:
+        return "connection", message
+    return "other", message
+
+
+# id(agent) -> (tracker, agent_id) for the agents of the round that is running
+_WATCHED: Dict[int, Tuple["FailureTracker", int]] = {}
+
+
+class FailureTracker:
+    """Records the agents whose model call failed during a round.
+
+    OASIS catches an exception from the model, logs it to its own agent log and returns it, so the round
+    loop only sees an agent that did nothing. ``install_failure_tracking`` wraps the agent method; the loop
+    calls ``begin_round`` with the agents it woke and ``end_round`` afterwards to get the failures. A failure
+    is also reported at once through ``on_failure`` so the UI can show it while the round is still running.
+    """
+
+    def __init__(self) -> None:
+        self.failures: List[Dict[str, Any]] = []
+        self._watched: List[int] = []
+        self._on_failure: Optional[Callable[[Dict[str, Any]], None]] = None
+
+    def begin_round(
+        self,
+        agents: Iterable[Tuple[int, Any]],
+        on_failure: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
+        self._release()
+        self.failures = []
+        self._on_failure = on_failure
+        for agent_id, agent in agents:
+            _WATCHED[id(agent)] = (self, agent_id)
+            self._watched.append(id(agent))
+
+    def end_round(self) -> List[Dict[str, Any]]:
+        self._release()
+        done, self.failures = self.failures, []
+        return done
+
+    def _release(self) -> None:
+        for key in self._watched:
+            _WATCHED.pop(key, None)
+        self._watched = []
+
+    def _record(self, agent_id: int, error: BaseException) -> None:
+        kind, message = classify_error(error)
+        failure = {"agent_id": agent_id, "kind": kind, "message": message}
+        self.failures.append(failure)
+        if self._on_failure is not None:
+            try:
+                self._on_failure(failure)
+            except Exception:
+                pass  # reporting must never break the simulation
+
+
+def install_failure_tracking(agent_class: Any) -> bool:
+    """Wrap ``agent_class.perform_action_by_llm`` so a returned exception is recorded. Idempotent."""
+    if getattr(agent_class, "_failure_tracking_installed", False):
+        return False
+    original = agent_class.perform_action_by_llm
+
+    @functools.wraps(original)
+    async def tracked(self, *args, **kwargs):
+        result = await original(self, *args, **kwargs)
+        if isinstance(result, BaseException):
+            entry = _WATCHED.get(id(self))
+            if entry is not None:
+                entry[0]._record(entry[1], result)
+        return result
+
+    agent_class.perform_action_by_llm = tracked
+    agent_class._failure_tracking_installed = True
+    return True
 
 
 # --- interviews --------------------------------------------------------------
@@ -271,6 +383,7 @@ async def run_final_poll(
     chunk_size: int = 5,
     retry_delays: Sequence[float] = FINAL_POLL_RETRY_DELAYS,
     log: Callable[[str], None] = print,
+    status: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> List[Dict[str, Any]]:
     """Interview every agent once on the outcome questions.
 
@@ -293,15 +406,41 @@ async def run_final_poll(
     )
     prompts = {int(cfg["agent_id"]): prompt for cfg in agents}
 
+    def report(state: str, results: Mapping[int, Dict[str, Any]], attempt: int, retry_in: Optional[float] = None) -> None:
+        """Tell the caller how many agents have answered and why the others have not (for the UI)."""
+        if status is None:
+            return
+        errors = [r["error"] for r in results.values() if r.get("error") and _is_blank(r.get("response"))]
+        kind, message = classify_error(errors[-1]) if errors else (None, None)
+        snapshot = {
+            "state": state,
+            "answered": sum(1 for r in results.values() if not _is_blank(r.get("response"))),
+            "total": len(prompts),
+            "attempt": attempt,
+            "max_attempts": len(retry_delays),
+            "retry_in": retry_in,
+            "error_kind": kind,
+            "message": message,
+        }
+        try:
+            status(snapshot)
+        except Exception:
+            pass  # reporting must never break the poll
+
+    report("running", {}, 0)
     results = await batch_interview(
         env, agent_graph, db_path, prompts, chunk_size=chunk_size, log=log
     )
+    report("running", results, 0)
 
+    attempts_used = 0
     for attempt, delay in enumerate(retry_delays, start=1):
         silent = _silent_agents(results)
         if not silent:
             break
+        attempts_used = attempt
         log(f"  最终问卷: {len(silent)} 个Agent没有回复，{delay:g}秒后重试（第 {attempt}/{len(retry_delays)} 次）")
+        report("waiting", results, attempt, retry_in=delay)
         if delay > 0:
             await asyncio.sleep(delay)
         retried = await batch_interview(
@@ -317,6 +456,9 @@ async def run_final_poll(
                 results[agent_id] = result
             elif result.get("error"):
                 results[agent_id]["error"] = result["error"]  # keep the latest reason
+        report("running", results, attempt)
+
+    report("done", results, attempts_used)
 
     rows: List[Dict[str, Any]] = []
     for cfg in agents:
