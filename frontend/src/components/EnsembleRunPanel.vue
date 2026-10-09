@@ -506,9 +506,9 @@ onUnmounted(stopPolling)
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: #FFF;
+  background: var(--c-ffffff);
   font-family: 'Space Grotesk', 'Noto Sans SC', system-ui, sans-serif;
-  color: #222;
+  color: var(--c-222222);
 }
 
 .scroll-area {
@@ -526,14 +526,14 @@ onUnmounted(stopPolling)
   justify-content: center;
   gap: 16px;
   font-size: 13px;
-  color: #666;
+  color: var(--c-666666);
 }
 
 .pulse-ring {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  border: 2px solid #FF5722;
+  border: 2px solid var(--c-ff5722);
   animation: ring-pulse 1.4s ease-out infinite;
 }
 
@@ -550,7 +550,7 @@ onUnmounted(stopPolling)
   margin: 0 0 6px;
   font-size: 18px;
   font-weight: 700;
-  color: #000;
+  color: var(--c-000000);
 }
 
 .block-subtitle {
@@ -559,21 +559,21 @@ onUnmounted(stopPolling)
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #333;
+  color: var(--c-333333);
 }
 
 .lead {
   margin: 0 0 8px;
   font-size: 14px;
   line-height: 1.55;
-  color: #333;
+  color: var(--c-333333);
 }
 
 .hint {
   margin: 4px 0 8px;
   font-size: 12px;
   line-height: 1.55;
-  color: #888;
+  color: var(--c-888888);
 }
 
 .empty-note {
@@ -581,16 +581,16 @@ onUnmounted(stopPolling)
   padding: 10px 12px;
   font-size: 12px;
   line-height: 1.5;
-  color: #777;
-  background: #FAFAFA;
-  border: 1px dashed #DDD;
+  color: var(--c-777777);
+  background: var(--c-fafafa);
+  border: 1px dashed var(--c-dddddd);
   border-radius: 6px;
 }
 
 .cost-block {
   padding: 12px 14px;
-  background: #FAFAFA;
-  border: 1px solid #EAEAEA;
+  background: var(--c-fafafa);
+  border: 1px solid var(--c-eaeaea);
   border-radius: 6px;
 }
 
@@ -598,7 +598,7 @@ onUnmounted(stopPolling)
   margin-left: 10px;
   font-size: 15px;
   font-weight: 700;
-  color: #000;
+  color: var(--c-000000);
 }
 
 .field-label {
@@ -606,7 +606,7 @@ onUnmounted(stopPolling)
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #999;
+  color: var(--c-999999);
 }
 
 .field {
@@ -622,9 +622,9 @@ onUnmounted(stopPolling)
 .question-card {
   margin-top: 10px;
   padding: 12px;
-  border: 1px solid #E5E5E5;
+  border: 1px solid var(--c-e5e5e5);
   border-radius: 6px;
-  background: #FFF;
+  background: var(--c-ffffff);
 }
 
 .question-row {
@@ -640,12 +640,12 @@ onUnmounted(stopPolling)
 .input {
   width: 100%;
   box-sizing: border-box;
-  border: 1px solid #DDD;
+  border: 1px solid var(--c-dddddd);
   border-radius: 4px;
   padding: 6px 8px;
   font-size: 12px;
   font-family: inherit;
-  background: #FAFAFA;
+  background: var(--c-fafafa);
 }
 
 textarea.input {
@@ -655,21 +655,21 @@ textarea.input {
 
 .input:focus {
   outline: none;
-  border-color: #FF5722;
-  background: #FFF;
+  border-color: var(--c-ff5722);
+  background: var(--c-ffffff);
 }
 
 .icon-btn {
   border: none;
   background: transparent;
-  color: #AAA;
+  color: var(--c-aaaaaa);
   font-size: 20px;
   line-height: 1;
   padding: 18px 6px 0;
   cursor: pointer;
 }
 
-.icon-btn:hover { color: #E53935; }
+.icon-btn:hover { color: var(--c-e53935); }
 
 .editor-actions {
   margin-top: 10px;
@@ -681,9 +681,9 @@ textarea.input {
 
 .btn {
   border-radius: 4px;
-  border: 1px solid #DDD;
-  background: #FFF;
-  color: #222;
+  border: 1px solid var(--c-dddddd);
+  background: var(--c-ffffff);
+  color: var(--c-222222);
   font-size: 12px;
   font-family: inherit;
   padding: 6px 12px;
@@ -691,9 +691,9 @@ textarea.input {
 }
 
 .btn.primary {
-  background: #000;
-  color: #FFF;
-  border-color: #000;
+  background: var(--c-000000);
+  color: var(--c-ffffff);
+  border-color: var(--c-000000);
 }
 
 .btn.large {
@@ -715,7 +715,7 @@ textarea.input {
 .error-text {
   margin: 8px 0;
   font-size: 12px;
-  color: #C62828;
+  color: var(--c-c62828);
 }
 
 .notice {
@@ -723,21 +723,21 @@ textarea.input {
   padding: 9px 12px;
   font-size: 12px;
   line-height: 1.5;
-  color: #555;
-  background: #F6F6F6;
+  color: var(--c-555555);
+  background: var(--c-f6f6f6);
   border-radius: 4px;
 }
 
 .notice.warn {
-  color: #6B5B2E;
-  background: #FFFAEB;
-  border: 1px solid #F1E3B5;
+  color: var(--c-6b5b2e);
+  background: var(--c-fffaeb);
+  border: 1px solid var(--c-f1e3b5);
 }
 
 .notice.error {
-  color: #C62828;
-  background: #FFF5F5;
-  border: 1px solid #F3CFCF;
+  color: var(--c-c62828);
+  background: var(--c-fff5f5);
+  border: 1px solid var(--c-f3cfcf);
 }
 
 /* --- status and runs --- */
@@ -752,7 +752,7 @@ textarea.input {
 
 .status-text {
   font-size: 12px;
-  color: #555;
+  color: var(--c-555555);
 }
 
 .chip {
@@ -761,8 +761,8 @@ textarea.input {
   border-radius: 10px;
   font-size: 11px;
   font-weight: 600;
-  background: #EEE;
-  color: #555;
+  background: var(--c-eeeeee);
+  color: var(--c-555555);
   white-space: nowrap;
 }
 
@@ -772,15 +772,15 @@ textarea.input {
 }
 
 .chip-running,
-.chip-aggregating { background: #FFF0EA; color: #E64A19; }
-.chip-completed { background: #E8F5E9; color: #2E7D32; }
-.chip-partial { background: #FFF6DD; color: #8A6D1D; }
-.chip-failed { background: #FDECEA; color: #C62828; }
+.chip-aggregating { background: var(--c-fff0ea); color: var(--c-e64a19); }
+.chip-completed { background: var(--c-e8f5e9); color: var(--c-2e7d32); }
+.chip-partial { background: var(--c-fff6dd); color: var(--c-8a6d1d); }
+.chip-failed { background: var(--c-fdecea); color: var(--c-c62828); }
 
 .bar {
   height: 6px;
   border-radius: 3px;
-  background: #EEE;
+  background: var(--c-eeeeee);
   overflow: hidden;
 }
 
@@ -792,13 +792,13 @@ textarea.input {
 
 .bar-fill {
   height: 100%;
-  background: #FF5722;
+  background: var(--c-ff5722);
   transition: width 0.4s ease;
 }
 
-.bar-fill.fill-completed { background: #43A047; }
-.bar-fill.fill-failed { background: #E53935; }
-.bar-fill.fill-stopped { background: #9E9E9E; }
+.bar-fill.fill-completed { background: var(--c-43a047); }
+.bar-fill.fill-failed { background: var(--c-e53935); }
+.bar-fill.fill-stopped { background: var(--c-9e9e9e); }
 
 .run-list {
   list-style: none;
@@ -812,7 +812,7 @@ textarea.input {
   flex-wrap: wrap;
   gap: 10px;
   padding: 9px 0;
-  border-bottom: 1px solid #F0F0F0;
+  border-bottom: 1px solid var(--c-f0f0f0);
   font-size: 12px;
 }
 
@@ -823,7 +823,7 @@ textarea.input {
 
 .run-round,
 .run-seed {
-  color: #888;
+  color: var(--c-888888);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -831,7 +831,7 @@ textarea.input {
 .run-error {
   flex-basis: 100%;
   padding-left: 74px;
-  color: #C62828;
+  color: var(--c-c62828);
   font-size: 11px;
 }
 
@@ -842,8 +842,8 @@ textarea.input {
   width: 12px;
   height: 12px;
   margin-right: 8px;
-  border: 2px solid rgba(255, 255, 255, 0.4);
-  border-top-color: #FFF;
+  border: 2px solid var(--c-ffffff-a400);
+  border-top-color: var(--c-ffffff);
   border-radius: 50%;
   vertical-align: -2px;
   animation: spin 0.8s linear infinite;

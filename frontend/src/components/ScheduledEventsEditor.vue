@@ -189,7 +189,7 @@ const save = async () => {
 .events-editor {
   margin-top: 20px;
   padding-top: 16px;
-  border-top: 1px dashed #E5E5E5;
+  border-top: 1px dashed var(--c-e5e5e5);
 }
 
 .box-label {
@@ -200,45 +200,45 @@ const save = async () => {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #666;
+  color: var(--c-666666);
 }
 
 .count-badge {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
-  background: #F0F0F0;
+  background: var(--c-f0f0f0);
   border-radius: 10px;
   padding: 1px 8px;
-  color: #333;
+  color: var(--c-333333);
 }
 
 .editor-desc {
   margin: 6px 0 12px;
   font-size: 12px;
   line-height: 1.5;
-  color: #888;
+  color: var(--c-888888);
 }
 
 .legacy-note {
   font-size: 12px;
-  color: #A66;
-  background: #FFF6F3;
-  border: 1px solid #F5D8CF;
+  color: var(--c-aa6666);
+  background: var(--c-fff6f3);
+  border: 1px solid var(--c-f5d8cf);
   border-radius: 6px;
   padding: 8px 10px;
 }
 
 .empty-state {
   font-size: 12px;
-  color: #999;
+  color: var(--c-999999);
   padding: 10px 0;
 }
 
 .event-row {
   position: relative;
-  border: 1px solid #E5E5E5;
+  border: 1px solid var(--c-e5e5e5);
   border-radius: 6px;
-  background: #fff;
+  background: var(--c-ffffff);
   padding: 10px;
   margin-bottom: 10px;
 }
@@ -269,24 +269,24 @@ const save = async () => {
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #999;
+  color: var(--c-999999);
 }
 
 .input {
   width: 100%;
   box-sizing: border-box;
-  border: 1px solid #DDD;
+  border: 1px solid var(--c-dddddd);
   border-radius: 4px;
   padding: 6px 8px;
   font-size: 12px;
   font-family: inherit;
-  background: #FAFAFA;
+  background: var(--c-fafafa);
 }
 
 .input:focus {
   outline: none;
-  border-color: #FF5722;
-  background: #fff;
+  border-color: var(--c-ff5722);
+  background: var(--c-ffffff);
 }
 
 .mono { font-family: 'JetBrains Mono', monospace; }
@@ -299,21 +299,21 @@ const save = async () => {
 .icon-btn {
   border: none;
   background: transparent;
-  color: #AAA;
+  color: var(--c-aaaaaa);
   font-size: 20px;
   line-height: 1;
   cursor: pointer;
   padding: 4px 6px;
 }
 
-.icon-btn:hover { color: #E53935; }
+.icon-btn:hover { color: var(--c-e53935); }
 
 .source-tag {
   display: inline-block;
   margin-top: 6px;
   font-size: 10px;
-  color: #888;
-  background: #F4F4F4;
+  color: var(--c-888888);
+  background: var(--c-f4f4f4);
   border-radius: 3px;
   padding: 1px 6px;
 }
@@ -327,29 +327,29 @@ const save = async () => {
 
 .btn {
   border-radius: 4px;
-  border: 1px solid #DDD;
+  border: 1px solid var(--c-dddddd);
   font-size: 12px;
   padding: 6px 12px;
   cursor: pointer;
-  background: #fff;
+  background: var(--c-ffffff);
 }
 
 .btn.small { padding: 3px 8px; font-size: 11px; }
-.btn.primary { background: #000; color: #fff; border-color: #000; }
+.btn.primary { background: var(--c-000000); color: var(--c-ffffff); border-color: var(--c-000000); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .saved-note {
   font-size: 12px;
-  color: #2E7D32;
+  color: var(--c-2e7d32);
 }
 
 .error-list {
   margin: 10px 0 0;
   padding: 8px 10px 8px 26px;
   font-size: 12px;
-  color: #C62828;
-  background: #FFF5F5;
-  border: 1px solid #F3CFCF;
+  color: var(--c-c62828);
+  background: var(--c-fff5f5);
+  border: 1px solid var(--c-f3cfcf);
   border-radius: 6px;
 }
 
@@ -362,18 +362,18 @@ const save = async () => {
   align-items: center;
   gap: 10px;
   padding: 8px 0;
-  border-bottom: 1px solid #F0F0F0;
+  border-bottom: 1px solid var(--c-f0f0f0);
   font-size: 12px;
 }
 
 .suggestion-hour {
-  color: #888;
+  color: var(--c-888888);
   white-space: nowrap;
 }
 
 .suggestion-text {
   flex: 1;
-  color: #444;
+  color: var(--c-444444);
   line-height: 1.45;
 }
 </style>

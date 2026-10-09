@@ -32,6 +32,12 @@
   "nav": {
     "visitGithub": "访问我们的Github主页"
   },
+  "theme": {
+    "label": "颜色主题",
+    "light": "浅色",
+    "dark": "深色",
+    "system": "跟随系统"
+  },
   "home": {
     "tagline": "简洁通用的群体智能引擎",
     "version": "/ v0.1-预览版",

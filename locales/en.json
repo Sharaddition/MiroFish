@@ -32,6 +32,12 @@
   "nav": {
     "visitGithub": "Visit our Github page"
   },
+  "theme": {
+    "label": "Color theme",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System"
+  },
   "home": {
     "tagline": "Concise & Universal Swarm Intelligence Engine",
     "version": "/ v0.1-Preview",

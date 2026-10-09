@@ -731,19 +731,19 @@ onUnmounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #FFFFFF;
+  background: var(--c-ffffff);
   font-family: 'Space Grotesk', 'Noto Sans SC', system-ui, sans-serif;
   overflow: hidden;
 }
 
 /* --- Control Bar --- */
 .control-bar {
-  background: #FFF;
+  background: var(--c-ffffff);
   padding: 12px 24px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  border-bottom: 1px solid #EAEAEA;
+  border-bottom: 1px solid var(--c-eaeaea);
   z-index: 10;
   height: 64px;
 }
@@ -764,12 +764,12 @@ onUnmounted(() => {
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #111;
+  color: var(--c-111111);
 }
 
 .ensemble-heading-runs {
   font-size: 12px;
-  color: #888;
+  color: var(--c-888888);
 }
 
 /* Platform Status Cards */
@@ -779,8 +779,8 @@ onUnmounted(() => {
   gap: 4px;
   padding: 6px 12px;
   border-radius: 4px;
-  background: #FAFAFA;
-  border: 1px solid #EAEAEA;
+  background: var(--c-fafafa);
+  border: 1px solid var(--c-eaeaea);
   opacity: 0.7;
   transition: all 0.3s;
   min-width: 140px;
@@ -790,14 +790,14 @@ onUnmounted(() => {
 
 .platform-status.active {
   opacity: 1;
-  border-color: #333;
-  background: #FFF;
+  border-color: var(--c-333333);
+  background: var(--c-ffffff);
 }
 
 .platform-status.completed {
   opacity: 1;
-  border-color: #1A936F;
-  background: #F2FAF6;
+  border-color: var(--c-1a936f);
+  background: var(--c-f2faf6);
 }
 
 /* Actions Tooltip */
@@ -808,8 +808,8 @@ onUnmounted(() => {
   transform: translateX(-50%);
   margin-top: 8px;
   padding: 10px 14px;
-  background: #000;
-  color: #FFF;
+  background: var(--c-000000);
+  color: var(--c-ffffff);
   border-radius: 4px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   opacity: 0;
@@ -828,7 +828,7 @@ onUnmounted(() => {
   transform: translateX(-50%);
   border-left: 6px solid transparent;
   border-right: 6px solid transparent;
-  border-bottom: 6px solid #000;
+  border-bottom: 6px solid var(--c-000000);
 }
 
 .platform-status:hover .actions-tooltip {
@@ -839,7 +839,7 @@ onUnmounted(() => {
 .tooltip-title {
   font-size: 10px;
   font-weight: 600;
-  color: #999;
+  color: var(--c-999999);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   margin-bottom: 8px;
@@ -855,9 +855,9 @@ onUnmounted(() => {
   font-size: 10px;
   font-weight: 600;
   padding: 3px 8px;
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--c-ffffff-a150);
   border-radius: 2px;
-  color: #FFF;
+  color: var(--c-ffffff);
   letter-spacing: 0.03em;
 }
 
@@ -871,13 +871,13 @@ onUnmounted(() => {
 .platform-name {
   font-size: 11px;
   font-weight: 700;
-  color: #000;
+  color: var(--c-000000);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
-.platform-status.twitter .platform-icon { color: #000; }
-.platform-status.reddit .platform-icon { color: #000; }
+.platform-status.twitter .platform-icon { color: var(--c-000000); }
+.platform-status.reddit .platform-icon { color: var(--c-000000); }
 
 .platform-stats {
   display: flex;
@@ -892,7 +892,7 @@ onUnmounted(() => {
 
 .stat-label {
   font-size: 8px;
-  color: #999;
+  color: var(--c-999999);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -901,18 +901,18 @@ onUnmounted(() => {
 .stat-value {
   font-size: 11px;
   font-weight: 600;
-  color: #333;
+  color: var(--c-333333);
 }
 
 .stat-total, .stat-unit {
   font-size: 9px;
-  color: #999;
+  color: var(--c-999999);
   font-weight: 400;
 }
 
 .status-badge {
   margin-left: auto;
-  color: #1A936F;
+  color: var(--c-1a936f);
   display: flex;
   align-items: center;
 }
@@ -934,12 +934,12 @@ onUnmounted(() => {
 }
 
 .action-btn.primary {
-  background: #000;
-  color: #FFF;
+  background: var(--c-000000);
+  color: var(--c-ffffff);
 }
 
 .action-btn.primary:hover:not(:disabled) {
-  background: #333;
+  background: var(--c-333333);
 }
 
 .action-btn:disabled {
@@ -952,17 +952,17 @@ onUnmounted(() => {
   flex: 1;
   overflow-y: auto;
   position: relative;
-  background: #FFF;
+  background: var(--c-ffffff);
 }
 
 /* Timeline Header */
 .timeline-header {
   position: sticky;
   top: 0;
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--c-ffffff-a900);
   backdrop-filter: blur(8px);
   padding: 12px 24px;
-  border-bottom: 1px solid #EAEAEA;
+  border-bottom: 1px solid var(--c-eaeaea);
   z-index: 5;
   display: flex;
   justify-content: center;
@@ -973,15 +973,15 @@ onUnmounted(() => {
   align-items: center;
   gap: 16px;
   font-size: 11px;
-  color: #666;
-  background: #F5F5F5;
+  color: var(--c-666666);
+  background: var(--c-f5f5f5);
   padding: 4px 12px;
   border-radius: 20px;
 }
 
 .total-count {
   font-weight: 600;
-  color: #333;
+  color: var(--c-333333);
 }
 
 .platform-breakdown {
@@ -996,9 +996,9 @@ onUnmounted(() => {
   gap: 4px;
 }
 
-.breakdown-divider { color: #DDD; }
-.breakdown-item.twitter { color: #000; }
-.breakdown-item.reddit { color: #000; }
+.breakdown-divider { color: var(--c-dddddd); }
+.breakdown-item.twitter { color: var(--c-000000); }
+.breakdown-item.reddit { color: var(--c-000000); }
 
 /* --- Timeline Feed --- */
 .timeline-feed {
@@ -1015,7 +1015,7 @@ onUnmounted(() => {
   top: 0;
   bottom: 0;
   width: 1px;
-  background: #EAEAEA; /* Cleaner line */
+  background: var(--c-eaeaea); /* Cleaner line */
   transform: translateX(-50%);
 }
 
@@ -1033,8 +1033,8 @@ onUnmounted(() => {
   top: 24px;
   width: 10px;
   height: 10px;
-  background: #FFF;
-  border: 1px solid #CCC;
+  background: var(--c-ffffff);
+  border: 1px solid var(--c-cccccc);
   border-radius: 50%;
   transform: translateX(-50%);
   z-index: 2;
@@ -1046,22 +1046,22 @@ onUnmounted(() => {
 .marker-dot {
   width: 4px;
   height: 4px;
-  background: #CCC;
+  background: var(--c-cccccc);
   border-radius: 50%;
 }
 
-.timeline-item.twitter .marker-dot { background: #000; }
-.timeline-item.reddit .marker-dot { background: #000; }
-.timeline-item.twitter .timeline-marker { border-color: #000; }
-.timeline-item.reddit .timeline-marker { border-color: #000; }
+.timeline-item.twitter .marker-dot { background: var(--c-000000); }
+.timeline-item.reddit .marker-dot { background: var(--c-000000); }
+.timeline-item.twitter .timeline-marker { border-color: var(--c-000000); }
+.timeline-item.reddit .timeline-marker { border-color: var(--c-000000); }
 
 /* Card Layout */
 .timeline-card {
   width: calc(100% - 48px);
-  background: #FFF;
+  background: var(--c-ffffff);
   border-radius: 2px;
   padding: 16px 20px;
-  border: 1px solid #EAEAEA;
+  border: 1px solid var(--c-eaeaea);
   box-shadow: 0 2px 10px rgba(0,0,0,0.02);
   position: relative;
   transition: all 0.2s;
@@ -1069,7 +1069,7 @@ onUnmounted(() => {
 
 .timeline-card:hover {
   box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-  border-color: #DDD;
+  border-color: var(--c-dddddd);
 }
 
 /* Left side (Twitter) */
@@ -1099,7 +1099,7 @@ onUnmounted(() => {
   align-items: flex-start;
   margin-bottom: 12px;
   padding-bottom: 12px;
-  border-bottom: 1px solid #F5F5F5;
+  border-bottom: 1px solid var(--c-f5f5f5);
 }
 
 .agent-info {
@@ -1111,8 +1111,8 @@ onUnmounted(() => {
 .avatar-placeholder {
   width: 24px;
   height: 24px;
-  background: #000;
-  color: #FFF;
+  background: var(--c-000000);
+  color: var(--c-ffffff);
   border-radius: 50%;
   display: flex;
   align-items: center;
@@ -1125,7 +1125,7 @@ onUnmounted(() => {
 .agent-name {
   font-size: 13px;
   font-weight: 600;
-  color: #000;
+  color: var(--c-000000);
 }
 
 .header-meta {
@@ -1135,7 +1135,7 @@ onUnmounted(() => {
 }
 
 .platform-indicator {
-  color: #999;
+  color: var(--c-999999);
   display: flex;
   align-items: center;
 }
@@ -1151,33 +1151,33 @@ onUnmounted(() => {
 }
 
 /* Monochromatic Badges */
-.badge-post { background: #F0F0F0; color: #333; border-color: #E0E0E0; }
-.badge-comment { background: #F0F0F0; color: #666; border-color: #E0E0E0; }
-.badge-action { background: #FFF; color: #666; border: 1px solid #E0E0E0; }
-.badge-meta { background: #FAFAFA; color: #999; border: 1px dashed #DDD; }
+.badge-post { background: var(--c-f0f0f0); color: var(--c-333333); border-color: var(--c-e0e0e0); }
+.badge-comment { background: var(--c-f0f0f0); color: var(--c-666666); border-color: var(--c-e0e0e0); }
+.badge-action { background: var(--c-ffffff); color: var(--c-666666); border: 1px solid var(--c-e0e0e0); }
+.badge-meta { background: var(--c-fafafa); color: var(--c-999999); border: 1px dashed var(--c-dddddd); }
 .badge-idle { opacity: 0.5; }
 
 .content-text {
   font-size: 13px;
   line-height: 1.6;
-  color: #333;
+  color: var(--c-333333);
   margin-bottom: 10px;
 }
 
 .content-text.main-text {
   font-size: 14px;
-  color: #000;
+  color: var(--c-000000);
 }
 
 /* Info Blocks (Quote, Repost, etc) */
 .quoted-block, .repost-content {
-  background: #F9F9F9;
-  border: 1px solid #EEE;
+  background: var(--c-f9f9f9);
+  border: 1px solid var(--c-eeeeee);
   padding: 10px 12px;
   border-radius: 2px;
   margin-top: 8px;
   font-size: 12px;
-  color: #555;
+  color: var(--c-555555);
 }
 
 .quote-header, .repost-info, .like-info, .search-info, .follow-info, .vote-info, .idle-info, .comment-context {
@@ -1186,19 +1186,19 @@ onUnmounted(() => {
   gap: 6px;
   margin-bottom: 6px;
   font-size: 11px;
-  color: #666;
+  color: var(--c-666666);
 }
 
 .icon-small {
-  color: #999;
+  color: var(--c-999999);
 }
 .icon-small.filled {
-  color: #999; /* Keep icons neutral unless highlighted */
+  color: var(--c-999999); /* Keep icons neutral unless highlighted */
 }
 
 .search-query {
   font-family: 'JetBrains Mono', monospace;
-  background: #F0F0F0;
+  background: var(--c-f0f0f0);
   padding: 0 4px;
   border-radius: 2px;
 }
@@ -1208,7 +1208,7 @@ onUnmounted(() => {
   display: flex;
   justify-content: flex-end;
   font-size: 10px;
-  color: #BBB;
+  color: var(--c-bbbbbb);
   font-family: 'JetBrains Mono', monospace;
 }
 
@@ -1222,7 +1222,7 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   gap: 16px;
-  color: #CCC;
+  color: var(--c-cccccc);
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.1em;
@@ -1232,13 +1232,13 @@ onUnmounted(() => {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  border: 1px solid #EAEAEA;
+  border: 1px solid var(--c-eaeaea);
   animation: ripple 2s infinite;
 }
 
 @keyframes ripple {
-  0% { transform: scale(0.8); opacity: 1; border-color: #CCC; }
-  100% { transform: scale(2.5); opacity: 0; border-color: #EAEAEA; }
+  0% { transform: scale(0.8); opacity: 1; border-color: var(--c-cccccc); }
+  100% { transform: scale(2.5); opacity: 0; border-color: var(--c-eaeaea); }
 }
 
 /* Animation */
@@ -1258,22 +1258,22 @@ onUnmounted(() => {
 
 /* Logs */
 .system-logs {
-  background: #000;
-  color: #DDD;
+  background: var(--c-000000);
+  color: var(--c-dddddd);
   padding: 16px;
   font-family: 'JetBrains Mono', monospace;
-  border-top: 1px solid #222;
+  border-top: 1px solid var(--c-222222);
   flex-shrink: 0;
 }
 
 .log-header {
   display: flex;
   justify-content: space-between;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--c-333333);
   padding-bottom: 8px;
   margin-bottom: 8px;
   font-size: 10px;
-  color: #666;
+  color: var(--c-666666);
 }
 
 .log-content {
@@ -1286,7 +1286,7 @@ onUnmounted(() => {
 }
 
 .log-content::-webkit-scrollbar { width: 4px; }
-.log-content::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+.log-content::-webkit-scrollbar-thumb { background: var(--c-333333); border-radius: 2px; }
 
 .log-line {
   font-size: 11px;
@@ -1295,8 +1295,8 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
-.log-time { color: #555; min-width: 75px; }
-.log-msg { color: #BBB; word-break: break-all; }
+.log-time { color: var(--c-555555); min-width: 75px; }
+.log-msg { color: var(--c-bbbbbb); word-break: break-all; }
 .mono { font-family: 'JetBrains Mono', monospace; }
 
 /* Loading spinner for button */
@@ -1304,8 +1304,8 @@ onUnmounted(() => {
   display: inline-block;
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #FFF;
+  border: 2px solid var(--c-ffffff-a300);
+  border-top-color: var(--c-ffffff);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   margin-right: 6px;

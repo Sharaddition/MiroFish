@@ -139,9 +139,9 @@ const rows = computed(() => {
 
 <style scoped>
 .ensemble-summary {
-  border: 1px solid #EAEAEA;
+  border: 1px solid var(--c-eaeaea);
   border-radius: 6px;
-  background: #FFF;
+  background: var(--c-ffffff);
   padding: 14px 16px;
 }
 
@@ -159,12 +159,12 @@ const rows = computed(() => {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #111;
+  color: var(--c-111111);
 }
 
 .summary-meta {
   font-size: 11px;
-  color: #777;
+  color: var(--c-777777);
 }
 
 .caveat {
@@ -172,9 +172,9 @@ const rows = computed(() => {
   padding: 8px 10px;
   font-size: 12px;
   line-height: 1.5;
-  color: #6B5B2E;
-  background: #FFFAEB;
-  border: 1px solid #F1E3B5;
+  color: var(--c-6b5b2e);
+  background: var(--c-fffaeb);
+  border: 1px solid var(--c-f1e3b5);
   border-radius: 4px;
 }
 
@@ -195,15 +195,15 @@ const rows = computed(() => {
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #999;
-  border-bottom: 1px solid #EAEAEA;
+  color: var(--c-999999);
+  border-bottom: 1px solid var(--c-eaeaea);
   white-space: nowrap;
 }
 
 .stats-table td {
   padding: 7px 6px;
   text-align: right;
-  border-bottom: 1px solid #F3F3F3;
+  border-bottom: 1px solid var(--c-f3f3f3);
   white-space: nowrap;
 }
 
@@ -211,7 +211,7 @@ const rows = computed(() => {
   text-align: left;
   white-space: normal;
   min-width: 120px;
-  color: #222;
+  color: var(--c-222222);
 }
 
 .group-row td {
@@ -219,23 +219,23 @@ const rows = computed(() => {
   white-space: normal;
   padding-top: 12px;
   font-weight: 600;
-  color: #222;
-  border-bottom: 1px solid #EAEAEA;
+  color: var(--c-222222);
+  border-bottom: 1px solid var(--c-eaeaea);
 }
 
 .option .col-label {
   padding-left: 20px;
-  color: #555;
+  color: var(--c-555555);
 }
 
 .note-row td {
   text-align: left;
   padding-top: 0;
   font-size: 11px;
-  color: #888;
+  color: var(--c-888888);
 }
 
-.muted { color: #999; text-align: left; }
-.strong { font-weight: 700; color: #000; }
+.muted { color: var(--c-999999); text-align: left; }
+.strong { font-weight: 700; color: var(--c-000000); }
 .mono { font-family: 'JetBrains Mono', monospace; }
 </style>
