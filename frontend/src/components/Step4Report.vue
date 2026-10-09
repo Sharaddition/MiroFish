@@ -16,6 +16,9 @@
             <div class="header-divider"></div>
           </div>
 
+          <!-- 集合运行统计：报告所依据的多次独立模拟的结果分布 -->
+          <EnsembleSummaryTable v-if="ensembleSummary" class="ensemble-block" :summary="ensembleSummary" />
+
           <!-- Sections List -->
           <div class="sections-list">
             <div 
@@ -394,6 +397,8 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } f
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getAgentLog, getConsoleLog } from '../api/report'
+import { getEnsembleSummary } from '../api/simulation'
+import EnsembleSummaryTable from './EnsembleSummaryTable.vue'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -401,6 +406,7 @@ const { t } = useI18n()
 const props = defineProps({
   reportId: String,
   simulationId: String,
+  ensembleId: String, // 报告基于的集合运行（没有则为单次运行的报告）
   systemLogs: Array
 })
 
@@ -1832,6 +1838,23 @@ const addLog = (msg) => {
   emit('add-log', msg)
 }
 
+// 集合运行的统计表（报告基于多次独立模拟时才有）
+const ensembleSummary = ref(null)
+
+const loadEnsembleSummary = async (ensembleId) => {
+  ensembleSummary.value = null
+  if (!ensembleId) return
+  try {
+    const res = await getEnsembleSummary(ensembleId)
+    // 页面可能在等待期间切换到了别的报告
+    if (ensembleId === props.ensembleId) ensembleSummary.value = res.data
+  } catch (err) {
+    addLog(t('ensemble.loadFailed', { error: err.message }))
+  }
+}
+
+watch(() => props.ensembleId, loadEnsembleSummary, { immediate: true })
+
 const isSectionCompleted = (sectionIndex) => {
   return !!generatedSections.value[sectionIndex]
 }
@@ -2362,6 +2385,10 @@ watch(() => props.reportId, (newId) => {
 }
 
 .report-header-block {
+  margin-bottom: 30px;
+}
+
+.ensemble-block {
   margin-bottom: 30px;
 }
 

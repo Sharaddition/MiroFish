@@ -267,27 +267,28 @@
             <!-- 平台配置 -->
             <div class="config-block">
               <div class="config-block-header">
-                <span class="config-block-title">{{ $t('step2.recommendAlgoConfig') }}</span>
+                <span class="config-block-title">{{ isBehaviorV2 ? $t('step2.networkConfig') : $t('step2.recommendAlgoConfig') }}</span>
               </div>
+              <p v-if="isBehaviorV2" class="block-note">{{ $t('step2.networkConfigNote') }}</p>
               <div class="platforms-grid">
                 <div v-if="simulationConfig.twitter_config" class="platform-card">
                   <div class="platform-card-header">
                     <span class="platform-name">{{ $t('step2.platform1Name') }}</span>
                   </div>
                   <div class="platform-params">
-                    <div class="param-row">
+                    <div v-if="simulationConfig.twitter_config.recency_weight !== undefined" class="param-row">
                       <span class="param-label">{{ $t('step2.recencyWeight') }}</span>
                       <span class="param-value">{{ simulationConfig.twitter_config.recency_weight }}</span>
                     </div>
-                    <div class="param-row">
+                    <div v-if="simulationConfig.twitter_config.popularity_weight !== undefined" class="param-row">
                       <span class="param-label">{{ $t('step2.popularityWeight') }}</span>
                       <span class="param-value">{{ simulationConfig.twitter_config.popularity_weight }}</span>
                     </div>
-                    <div class="param-row">
+                    <div v-if="simulationConfig.twitter_config.relevance_weight !== undefined" class="param-row">
                       <span class="param-label">{{ $t('step2.relevanceWeight') }}</span>
                       <span class="param-value">{{ simulationConfig.twitter_config.relevance_weight }}</span>
                     </div>
-                    <div class="param-row">
+                    <div v-if="simulationConfig.twitter_config.viral_threshold !== undefined" class="param-row">
                       <span class="param-label">{{ $t('step2.viralThreshold') }}</span>
                       <span class="param-value">{{ simulationConfig.twitter_config.viral_threshold }}</span>
                     </div>
@@ -302,19 +303,19 @@
                     <span class="platform-name">{{ $t('step2.platform2Name') }}</span>
                   </div>
                   <div class="platform-params">
-                    <div class="param-row">
+                    <div v-if="simulationConfig.reddit_config.recency_weight !== undefined" class="param-row">
                       <span class="param-label">{{ $t('step2.recencyWeight') }}</span>
                       <span class="param-value">{{ simulationConfig.reddit_config.recency_weight }}</span>
                     </div>
-                    <div class="param-row">
+                    <div v-if="simulationConfig.reddit_config.popularity_weight !== undefined" class="param-row">
                       <span class="param-label">{{ $t('step2.popularityWeight') }}</span>
                       <span class="param-value">{{ simulationConfig.reddit_config.popularity_weight }}</span>
                     </div>
-                    <div class="param-row">
+                    <div v-if="simulationConfig.reddit_config.relevance_weight !== undefined" class="param-row">
                       <span class="param-label">{{ $t('step2.relevanceWeight') }}</span>
                       <span class="param-value">{{ simulationConfig.reddit_config.relevance_weight }}</span>
                     </div>
-                    <div class="param-row">
+                    <div v-if="simulationConfig.reddit_config.viral_threshold !== undefined" class="param-row">
                       <span class="param-label">{{ $t('step2.viralThreshold') }}</span>
                       <span class="param-value">{{ simulationConfig.reddit_config.viral_threshold }}</span>
                     </div>
@@ -385,6 +386,12 @@
               <p class="narrative-text">{{ simulationConfig.event_config.narrative_direction }}</p>
             </div>
 
+            <!-- 议题（会写进每个 Agent 的人设） -->
+            <div v-if="simulationConfig.event_config.topic" class="topics-section">
+              <span class="box-label">{{ $t('step2.topicGivenToAgents') }}</span>
+              <p class="topic-text">{{ simulationConfig.event_config.topic }}</p>
+            </div>
+
             <!-- 热点话题 -->
             <div class="topics-section">
               <span class="box-label">{{ $t('step2.initialHotTopics') }}</span>
@@ -414,6 +421,13 @@
                 </div>
               </div>
             </div>
+
+            <!-- 定时事件（用户编写，"上帝视角"） -->
+            <ScheduledEventsEditor
+              :simulation-id="simulationId"
+              :config="simulationConfig"
+              @add-log="addLog"
+            />
           </div>
         </div>
       </div>
@@ -509,8 +523,31 @@
             </Transition>
           </div>
 
+          <!-- 运行次数：大于 1 时进入集合运行（N 次带不同随机种子的独立模拟，看结果的分布） -->
+          <div v-if="simulationConfig && autoGeneratedRounds" class="runs-config-section">
+            <div class="runs-header">
+              <span class="section-title">{{ $t('step2.runs.title') }}</span>
+              <span class="section-desc">{{ $t('step2.runs.desc') }}</span>
+            </div>
+            <div class="runs-body">
+              <input
+                type="number"
+                class="runs-input"
+                min="1"
+                :max="MAX_RUNS"
+                step="1"
+                v-model.number="runs"
+                @blur="runs = normalizedRuns"
+              />
+              <span class="runs-unit">{{ $t('step2.runs.unit') }}</span>
+              <span class="runs-note" :class="{ muted: normalizedRuns === 1 }">
+                {{ normalizedRuns > 1 ? $t('step2.runs.ensembleNote', { runs: normalizedRuns, rounds: effectiveRounds }) : $t('step2.runs.single') }}
+              </span>
+            </div>
+          </div>
+
           <div class="action-group dual">
-            <button 
+            <button
               class="action-btn secondary"
               @click="$emit('go-back')"
             >
@@ -634,6 +671,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
+import ScheduledEventsEditor from './ScheduledEventsEditor.vue'
 import {
   prepareSimulation,
   getPrepareStatus,
@@ -675,6 +713,14 @@ let lastLoggedConfigStage = ''
 const useCustomRounds = ref(false) // 默认使用自动配置轮数
 const customMaxRounds = ref(40)   // 默认推荐40轮
 
+// 运行次数（1 = 单次运行；大于 1 = 集合运行，最多 50 次）
+const MAX_RUNS = 50
+const runs = ref(1)
+const normalizedRuns = computed(() => {
+  const value = Math.floor(Number(runs.value))
+  return Number.isFinite(value) ? Math.min(MAX_RUNS, Math.max(1, value)) : 1
+})
+
 // Watch stage to update phase
 watch(currentStage, (newStage) => {
   if (newStage === '生成Agent人设' || newStage === 'generating_profiles') {
@@ -705,6 +751,12 @@ const autoGeneratedRounds = computed(() => {
   // 确保最大轮数不小于40（推荐值），避免滑动条范围异常
   return Math.max(calculatedRounds, 40)
 })
+
+// 实际使用的轮数上限：自定义轮数，否则是配置自动算出的轮数
+const effectiveRounds = computed(() => (useCustomRounds.value ? customMaxRounds.value : autoGeneratedRounds.value))
+
+// 行为版本 >= 2 的配置里，所有展示出来的参数都会真正影响模拟
+const isBehaviorV2 = computed(() => (simulationConfig.value?.behavior_version || 1) >= 2)
 
 // Polling timer
 let pollTimer = null
@@ -761,7 +813,14 @@ const handleStartSimulation = () => {
     // 用户选择保持自动生成的轮数，不传递 max_rounds 参数
     addLog(t('log.startSimAutoRounds', { rounds: autoGeneratedRounds.value }))
   }
-  
+
+  if (normalizedRuns.value > 1) {
+    // 集合运行必须有明确的轮数上限（成本保护），所以自动轮数也要显式传下去
+    params.runs = normalizedRuns.value
+    params.maxRounds = effectiveRounds.value
+    addLog(t('log.startSimEnsemble', { runs: params.runs, rounds: params.maxRounds }))
+  }
+
   emit('next-step', params)
 }
 
@@ -2334,6 +2393,58 @@ onUnmounted(() => {
   margin: 0 2px;
 }
 
+/* 运行次数（集合运行） */
+.runs-config-section {
+  margin: 0 0 24px;
+  padding-top: 20px;
+  border-top: 1px solid #EAEAEA;
+}
+
+.runs-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.runs-body {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.runs-input {
+  width: 72px;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid #DDD;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  background: #FAFAFA;
+}
+
+.runs-input:focus {
+  outline: none;
+  border-color: #FF5722;
+  background: #FFF;
+}
+
+.runs-unit {
+  font-size: 13px;
+  color: #475569;
+}
+
+.runs-note {
+  font-size: 12px;
+  color: #475569;
+}
+
+.runs-note.muted {
+  color: #94A3B8;
+}
+
 /* Switch Control */
 .switch-control {
   display: flex;
@@ -2619,5 +2730,19 @@ onUnmounted(() => {
 .modal-leave-to .profile-modal {
   transform: scale(0.95) translateY(10px);
   opacity: 0;
+}
+
+.block-note {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #888;
+}
+
+.topic-text {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #333;
 }
 </style>

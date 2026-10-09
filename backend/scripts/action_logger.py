@@ -16,7 +16,7 @@ import json
 import os
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 
 class PlatformActionLogger:
@@ -48,9 +48,18 @@ class PlatformActionLogger:
         action_type: str,
         action_args: Optional[Dict[str, Any]] = None,
         result: Optional[str] = None,
-        success: bool = True
+        success: bool = True,
+        phase: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None
     ):
-        """记录一个动作"""
+        """记录一个动作
+
+        phase 标记非常规记录：
+            "setup"    运行开始时播种的关注图（不计入动作统计、不写入Zep）
+            "injected" 用户编写的定时事件（正常的发帖动作，附带 event_id）
+            "poll"     结束时的最终问卷访谈（不计入动作统计）
+        常规的轮次动作不带 phase 字段。
+        """
         entry = {
             "round": round_num,
             "timestamp": datetime.now().isoformat(),
@@ -61,11 +70,15 @@ class PlatformActionLogger:
             "result": result,
             "success": success,
         }
-        
+        if phase:
+            entry["phase"] = phase
+        if extra:
+            entry.update(extra)
+
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
-    
-    def log_round_start(self, round_num: int, simulated_hour: int):
+
+    def log_round_start(self, round_num: int, simulated_hour: int, active_agent_ids: Optional[List[int]] = None):
         """记录轮次开始"""
         entry = {
             "round": round_num,
@@ -73,6 +86,8 @@ class PlatformActionLogger:
             "event_type": "round_start",
             "simulated_hour": simulated_hour,
         }
+        if active_agent_ids is not None:
+            entry["active_agent_ids"] = list(active_agent_ids)
         
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
@@ -239,7 +254,7 @@ class ActionLogger:
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
     
-    def log_round_start(self, round_num: int, simulated_hour: int, platform: str):
+    def log_round_start(self, round_num: int, simulated_hour: int, platform: str, active_agent_ids: Optional[List[int]] = None):
         entry = {
             "round": round_num,
             "timestamp": datetime.now().isoformat(),
@@ -247,6 +262,8 @@ class ActionLogger:
             "event_type": "round_start",
             "simulated_hour": simulated_hour,
         }
+        if active_agent_ids is not None:
+            entry["active_agent_ids"] = list(active_agent_ids)
         
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')

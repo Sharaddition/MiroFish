@@ -2,7 +2,13 @@
   <div class="simulation-panel">
     <!-- Top Control Bar -->
     <div class="control-bar">
-      <div class="status-group">
+      <!-- 集合运行：显示标题，不显示单次运行的两个平台进度卡 -->
+      <div v-if="ensembleMode" class="ensemble-heading">
+        <span class="ensemble-heading-title">{{ $t('ensemble.title') }}</span>
+        <span class="ensemble-heading-runs mono">× {{ runs }}</span>
+      </div>
+
+      <div v-else class="status-group">
         <!-- Twitter 平台进度 -->
         <div class="platform-status twitter" :class="{ active: runStatus.twitter_running, completed: runStatus.twitter_completed }">
           <div class="platform-header">
@@ -90,7 +96,7 @@
         </div>
       </div>
 
-      <div class="action-controls">
+      <div v-if="!ensembleMode" class="action-controls">
         <button 
           class="action-btn primary"
           :disabled="phase !== 2 || isGeneratingReport"
@@ -104,7 +110,7 @@
     </div>
 
     <!-- Main Content: Dual Timeline -->
-    <div class="main-content-area" ref="scrollContainer">
+    <div v-if="!ensembleMode" class="main-content-area" ref="scrollContainer">
       <!-- Timeline Header -->
       <div class="timeline-header" v-if="allActions.length > 0">
         <div class="timeline-stats">
@@ -269,6 +275,17 @@
       </div>
     </div>
 
+    <!-- 集合运行：N 次带不同随机种子的独立模拟，代替上面的单次运行时间线 -->
+    <EnsembleRunPanel
+      v-else
+      :simulationId="simulationId"
+      :runs="runs"
+      :maxRounds="maxRounds"
+      :ensembleId="ensembleId"
+      @add-log="addLog"
+      @update-status="(status) => emit('update-status', status)"
+    />
+
     <!-- Bottom Info / Logs -->
     <div class="system-logs">
       <div class="log-header">
@@ -296,6 +313,7 @@ import {
   getRunStatusDetail
 } from '../api/simulation'
 import { generateReport } from '../api/report'
+import EnsembleRunPanel from './EnsembleRunPanel.vue'
 
 const { t } = useI18n()
 
@@ -308,7 +326,12 @@ const props = defineProps({
   },
   projectData: Object,
   graphData: Object,
-  systemLogs: Array
+  systemLogs: Array,
+  runs: {
+    type: Number,
+    default: 1 // 从Step2传入的运行次数；大于1时进入集合运行模式
+  },
+  ensembleId: String // 地址栏中的集合运行ID（刷新页面后继续同一个集合运行）
 })
 
 const emit = defineEmits(['go-back', 'next-step', 'add-log', 'update-status'])
@@ -327,6 +350,9 @@ const actionIds = ref(new Set()) // 用于去重的动作ID集合
 const scrollContainer = ref(null)
 
 // Computed
+// 运行次数大于 1：不自动启动单次模拟，而是创建并运行一个集合运行
+const ensembleMode = computed(() => (props.runs || 1) > 1 || !!props.ensembleId)
+
 // 按时间顺序显示动作（最新的在最后面，即底部）
 const chronologicalActions = computed(() => {
   return allActions.value
@@ -690,7 +716,7 @@ watch(() => props.systemLogs?.length, () => {
 
 onMounted(() => {
   addLog(t('log.step3Init'))
-  if (props.simulationId) {
+  if (props.simulationId && !ensembleMode.value) {
     doStartSimulation()
   }
 })
@@ -725,6 +751,25 @@ onUnmounted(() => {
 .status-group {
   display: flex;
   gap: 12px;
+}
+
+.ensemble-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.ensemble-heading-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #111;
+}
+
+.ensemble-heading-runs {
+  font-size: 12px;
+  color: #888;
 }
 
 /* Platform Status Cards */

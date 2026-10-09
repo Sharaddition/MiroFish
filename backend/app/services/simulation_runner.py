@@ -8,6 +8,7 @@ import sys
 import json
 import time
 import asyncio
+import secrets
 import threading
 import subprocess
 import signal
@@ -19,6 +20,7 @@ from enum import Enum
 from queue import Queue
 
 from ..config import Config
+from ..utils.atomic_write import write_json_atomic
 from ..utils.logger import get_logger
 from ..utils.locale import get_locale, set_locale
 from ..utils.zep import (
@@ -35,6 +37,11 @@ _cleanup_registered = False
 
 # 平台检测
 IS_WINDOWS = sys.platform == 'win32'
+
+# actions.jsonl 中不属于 Agent 行为的记录：运行开始时播种的关注图（"setup"）
+# 和结束时的最终问卷访谈（"poll"）。它们不计入动作数、时间线、Agent 统计，
+# 也不会写入 Zep 记忆。定时事件（"injected"）是正常的发帖动作，照常计入。
+NON_BEHAVIOR_PHASES = frozenset({"setup", "poll"})
 
 
 class RunnerStatus(str, Enum):
@@ -151,7 +158,10 @@ class SimulationRunState:
     
     # 进程ID（用于停止）
     process_pid: Optional[int] = None
-    
+
+    # 随机种子（让调度可复现：激活、响应延迟、关注图、定时事件；不保证LLM输出一致）
+    seed: Optional[int] = None
+
     def add_action(self, action: AgentAction):
         """添加动作到最近动作列表"""
         self.recent_actions.insert(0, action)
@@ -191,8 +201,9 @@ class SimulationRunState:
             "completed_at": self.completed_at,
             "error": self.error,
             "process_pid": self.process_pid,
+            "seed": self.seed,
         }
-    
+
     def to_detail_dict(self) -> Dict[str, Any]:
         """包含最近动作的详细信息"""
         result = self.to_dict()
@@ -331,8 +342,9 @@ class SimulationRunner:
                 completed_at=data.get("completed_at"),
                 error=data.get("error"),
                 process_pid=data.get("process_pid"),
+                seed=data.get("seed"),
             )
-            
+
             # 加载最近动作
             actions_data = data.get("recent_actions", [])
             for a in actions_data:
@@ -366,7 +378,33 @@ class SimulationRunner:
             json.dump(data, f, ensure_ascii=False, indent=2)
         
         cls._run_states[state.simulation_id] = state
-    
+
+    @classmethod
+    def _write_run_block(
+        cls,
+        config_path: str,
+        config: Dict[str, Any],
+        seed: int,
+        max_rounds: Optional[int],
+    ) -> None:
+        """Record this run's seed (and round cap) in the config's ``run`` block.
+
+        Other run settings already in the block (``replicate_index``,
+        ``ensemble_id``, ``llm_temperature``, ``outcome_questions`` ...) are
+        preserved. The file is replaced atomically so readers never see a
+        half-written config.
+        """
+        run = dict(config.get("run") or {})
+        run["seed"] = seed
+        run.setdefault("replicate_index", None)
+        run.setdefault("ensemble_id", None)
+        if max_rounds is not None and max_rounds > 0:
+            run["max_rounds"] = max_rounds
+        else:
+            run.pop("max_rounds", None)
+        config["run"] = run
+        write_json_atomic(config_path, config)
+
     @classmethod
     def start_simulation(
         cls,
@@ -374,21 +412,32 @@ class SimulationRunner:
         platform: str = "parallel",  # twitter / reddit / parallel
         max_rounds: int = None,  # 最大模拟轮数（可选，用于截断过长的模拟）
         enable_graph_memory_update: bool = False,  # 是否将活动更新到Zep图谱
-        graph_id: str = None  # Zep图谱ID（启用图谱更新时必需）
+        graph_id: str = None,  # Zep图谱ID（启用图谱更新时必需）
+        seed: Optional[int] = None,  # 随机种子（缺省时随机生成并持久化）
+        wait_for_commands: bool = True,  # False 时传 --no-wait：跑完立即退出，释放资源
     ) -> SimulationRunState:
         """
         启动模拟
-        
+
         Args:
             simulation_id: 模拟ID
             platform: 运行平台 (twitter/reddit/parallel)
             max_rounds: 最大模拟轮数（可选，用于截断过长的模拟）
             enable_graph_memory_update: 是否将Agent活动动态更新到Zep图谱
             graph_id: Zep图谱ID（启用图谱更新时必需）
-            
+            seed: 随机种子。让"调度"可复现（谁在何时被激活、响应延迟、初始关注图、
+                定时事件），但不保证LLM输出逐字一致。缺省时随机生成，并写入
+                run_state.json 与配置文件的 run 块。
+            wait_for_commands: 模拟结束后是否保持环境运行以接受 Interview 命令。
+                False 时进程跑完即退出（集成测试/集合运行使用）。
+
         Returns:
             SimulationRunState
         """
+        if seed is None:
+            seed = secrets.randbelow(2 ** 31)
+        else:
+            seed = int(seed)
         # 加载模拟配置
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         config_path = os.path.join(sim_dir, "simulation_config.json")
@@ -418,8 +467,9 @@ class SimulationRunner:
             total_rounds=total_rounds,
             total_simulation_hours=total_hours,
             started_at=datetime.now().isoformat(),
+            seed=seed,
         )
-        
+
         # Atomically claim this simulation ID. The expensive updater/process
         # startup happens after releasing the lock, while the persisted
         # STARTING state makes every concurrent start fail closed.
@@ -432,11 +482,22 @@ class SimulationRunner:
                 RunnerStatus.STOPPING,
             }
             if (
-                existing and existing.runner_status in active_statuses
-            ) or ZepGraphMemoryManager.get_updater(simulation_id) is not None:
+                (existing and existing.runner_status in active_statuses)
+                or ZepGraphMemoryManager.get_updater(simulation_id) is not None
+                # A COMPLETED run may still own a live interview environment.
+                or cls.has_live_process(simulation_id)
+            ):
                 raise ValueError(f"模拟已在运行或结束处理中: {simulation_id}")
             cls._save_run_state(state)
-        
+            # A previous run's "alive" marker must not make this run look like
+            # it is already parked in command-wait mode.
+            try:
+                os.remove(os.path.join(sim_dir, "env_status.json"))
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                logger.warning(f"清理旧的环境状态文件失败: {simulation_id}, error={error}")
+
         # 如果启用图谱记忆更新，创建更新器
         if enable_graph_memory_update:
             if not graph_id:
@@ -514,15 +575,23 @@ class SimulationRunner:
             #   reddit/actions.jsonl  - Reddit 动作日志
             #   simulation.log        - 主进程日志
             
+            # 把种子写进配置快照（run 块），脚本也通过 --seed 收到同一个值
+            cls._write_run_block(config_path, config, seed, max_rounds)
+
             cmd = [
                 sys.executable,  # Python解释器
                 script_path,
                 "--config", config_path,  # 使用完整配置文件路径
+                "--seed", str(seed),
             ]
-            
+
             # 如果指定了最大轮数，添加到命令行参数
             if max_rounds is not None and max_rounds > 0:
                 cmd.extend(["--max-rounds", str(max_rounds)])
+
+            # 不等待命令：脚本跑完就退出（监控线程据此发布 COMPLETED）
+            if not wait_for_commands:
+                cmd.append("--no-wait")
             
             # 创建主日志文件，避免 stdout/stderr 管道缓冲区满导致进程阻塞
             main_log_path = os.path.join(sim_dir, "simulation.log")
@@ -637,6 +706,9 @@ class SimulationRunner:
         
         monitor_error: Exception | None = None
         exit_code: int | None = None
+        # True once the run was published as COMPLETED while the script was
+        # still parked in command-wait mode (kept alive for interviews).
+        published_while_idle = False
         try:
             while process.poll() is None:  # 进程仍在运行
                 # 读取 Twitter 动作日志
@@ -644,15 +716,23 @@ class SimulationRunner:
                     twitter_position = cls._read_action_log(
                         twitter_actions_log, twitter_position, state, "twitter"
                     )
-                
+
                 # 读取 Reddit 动作日志
                 if os.path.exists(reddit_actions_log):
                     reddit_position = cls._read_action_log(
                         reddit_actions_log, reddit_position, state, "reddit"
                     )
-                
+
                 # 更新状态
                 cls._save_run_state(state)
+
+                # The script deliberately stays alive after the last round so
+                # agents can be interviewed. Waiting for it to exit would keep
+                # the run RUNNING forever and block the report stage.
+                if not published_while_idle and cls._is_idle_in_command_wait(state):
+                    published_while_idle = cls._publish_completion_while_idle(
+                        simulation_id
+                    )
                 time.sleep(2)
             
             # 进程结束后，最后读取一次日志
@@ -676,7 +756,11 @@ class SimulationRunner:
                 if latest_state is not None:
                     state = latest_state
 
-                if state.runner_status not in {
+                already_published = (
+                    published_while_idle
+                    and state.runner_status == RunnerStatus.COMPLETED
+                )
+                if not already_published and state.runner_status not in {
                     RunnerStatus.STOPPED,
                     RunnerStatus.FAILED,
                 }:
@@ -704,44 +788,9 @@ class SimulationRunner:
                             f"进程退出码: {exit_code}, 错误: {error_info}"
                         )
 
-                    state.twitter_running = False
-                    state.reddit_running = False
-
-                    if cls._graph_memory_enabled.get(simulation_id, False):
-                        # STOPPING is a non-terminal ingestion barrier. The UI
-                        # and report API must not observe COMPLETED until every
-                        # accepted episode is processed by Zep Cloud.
-                        state.runner_status = RunnerStatus.STOPPING
-                        cls._save_run_state(state)
-                        cls._sync_simulation_status(
-                            simulation_id,
-                            RunnerStatus.STOPPING,
-                        )
-                        try:
-                            ZepGraphMemoryManager.stop_updater(simulation_id)
-                            cls._graph_memory_enabled.pop(simulation_id, None)
-                            logger.info(
-                                "已停止图谱记忆更新: simulation_id=%s",
-                                simulation_id,
-                            )
-                        except Exception as error:
-                            logger.error(f"停止图谱记忆更新器失败: {error}")
-                            desired_status = RunnerStatus.FAILED
-                            error_message = f"Zep图谱写入未完整完成: {error}"
-
-                    state.runner_status = desired_status
-                    state.error = error_message
-                    state.completed_at = datetime.now().isoformat()
-                    cls._save_run_state(state)
-                    cls._sync_simulation_status(
-                        simulation_id,
-                        desired_status,
-                        error_message,
+                    cls._publish_terminal_state(
+                        simulation_id, state, desired_status, error_message
                     )
-                    if desired_status == RunnerStatus.COMPLETED:
-                        logger.info(f"模拟完成: {simulation_id}")
-                    else:
-                        logger.error(f"模拟失败: {simulation_id}, error={state.error}")
                 cls._manual_stop_requests.discard(simulation_id)
             
             # 清理进程资源
@@ -762,7 +811,105 @@ class SimulationRunner:
                 except Exception:
                     pass
                 cls._stderr_files.pop(simulation_id, None)
-    
+
+    @classmethod
+    def _publish_terminal_state(
+        cls,
+        simulation_id: str,
+        state: SimulationRunState,
+        desired_status: RunnerStatus,
+        error_message: Optional[str],
+    ) -> None:
+        """Drain Zep ingestion, then publish the run's terminal status.
+
+        The caller must hold the simulation's finalization lock.
+        """
+        state.twitter_running = False
+        state.reddit_running = False
+
+        if cls._graph_memory_enabled.get(simulation_id, False):
+            # STOPPING is a non-terminal ingestion barrier. The UI
+            # and report API must not observe COMPLETED until every
+            # accepted episode is processed by Zep Cloud.
+            state.runner_status = RunnerStatus.STOPPING
+            cls._save_run_state(state)
+            cls._sync_simulation_status(
+                simulation_id,
+                RunnerStatus.STOPPING,
+            )
+            try:
+                ZepGraphMemoryManager.stop_updater(simulation_id)
+                cls._graph_memory_enabled.pop(simulation_id, None)
+                logger.info(
+                    "已停止图谱记忆更新: simulation_id=%s",
+                    simulation_id,
+                )
+            except Exception as error:
+                logger.error(f"停止图谱记忆更新器失败: {error}")
+                desired_status = RunnerStatus.FAILED
+                error_message = f"Zep图谱写入未完整完成: {error}"
+
+        state.runner_status = desired_status
+        state.error = error_message
+        state.completed_at = datetime.now().isoformat()
+        cls._save_run_state(state)
+        cls._sync_simulation_status(
+            simulation_id,
+            desired_status,
+            error_message,
+        )
+        if desired_status == RunnerStatus.COMPLETED:
+            logger.info(f"模拟完成: {simulation_id}")
+        else:
+            logger.error(f"模拟失败: {simulation_id}, error={state.error}")
+
+    @classmethod
+    def _is_idle_in_command_wait(cls, state: SimulationRunState) -> bool:
+        """Whether the script finished every round and is parked waiting for
+        interview / close_env commands.
+
+        Nothing more will be produced at that point, but the process will not
+        exit on its own, so process exit cannot be the completion signal.
+        """
+        if state.runner_status != RunnerStatus.RUNNING:
+            return False
+        if state.twitter_running or state.reddit_running:
+            return False
+        return (
+            cls._check_all_platforms_completed(state)
+            and cls.check_env_alive(state.simulation_id)
+        )
+
+    @classmethod
+    def _publish_completion_while_idle(cls, simulation_id: str) -> bool:
+        """Publish the run's result while its environment stays alive.
+
+        The process is deliberately left running so agents can still be
+        interviewed (including by the report agent). Returns False when a stop
+        request or another finalizer owns the outcome instead.
+        """
+        with cls._finalization_lock(simulation_id):
+            state = cls.get_run_state(simulation_id)
+            if (
+                state is None
+                or state.runner_status != RunnerStatus.RUNNING
+                or simulation_id in cls._manual_stop_requests
+            ):
+                return False
+            logger.info(
+                f"所有平台已结束，环境进入等待命令模式，发布完成状态: {simulation_id}"
+            )
+            cls._publish_terminal_state(
+                simulation_id, state, RunnerStatus.COMPLETED, None
+            )
+            return True
+
+    @classmethod
+    def has_live_process(cls, simulation_id: str) -> bool:
+        """Whether this simulation's script process is still running."""
+        process = cls._processes.get(simulation_id)
+        return process is not None and process.poll() is None
+
     @classmethod
     def _read_action_log(
         cls, 
@@ -849,7 +996,11 @@ class SimulationRunner:
                                     state.simulated_hours = max(state.twitter_simulated_hours, state.reddit_simulated_hours)
                                 
                                 continue
-                            
+
+                            # 播种的关注图 / 最终问卷不是 Agent 行为
+                            if action_data.get("phase") in NON_BEHAVIOR_PHASES:
+                                continue
+
                             action = AgentAction(
                                 round_num=action_data.get("round", 0),
                                 timestamp=action_data.get("timestamp", datetime.now().isoformat()),
@@ -962,8 +1113,61 @@ class SimulationRunner:
                 process.wait(timeout=5)
     
     @classmethod
+    def _close_idle_environment(
+        cls, simulation_id: str
+    ) -> Optional[SimulationRunState]:
+        """Terminate the interview environment of an already-COMPLETED run.
+
+        The run published its result when the last round finished; only the
+        process kept alive for interviews is left. It is closed without
+        rewriting that result. Returns the COMPLETED state, or None when this
+        is not an idle-environment teardown (the regular stop flow applies).
+        """
+        with cls._finalization_lock(simulation_id):
+            state = cls.get_run_state(simulation_id)
+            if (
+                state is None
+                or state.runner_status != RunnerStatus.COMPLETED
+                or ZepGraphMemoryManager.get_updater(simulation_id) is not None
+                or not cls.has_live_process(simulation_id)
+            ):
+                return None
+
+            process = cls._processes[simulation_id]
+            try:
+                cls._terminate_process(process, simulation_id)
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                logger.error(f"终止进程组失败: {simulation_id}, error={e}")
+                try:
+                    process.terminate()
+                    process.wait(timeout=5)
+                except Exception:
+                    process.kill()
+
+        # The monitor releases this run's process/log resources when it sees
+        # the exit. Wait for that so an immediate restart cannot race with it.
+        monitor = cls._monitor_threads.get(simulation_id)
+        if (
+            monitor is not None
+            and monitor is not threading.current_thread()
+            and monitor.is_alive()
+        ):
+            monitor.join(timeout=30.0)
+            if monitor.is_alive():
+                raise SimulationStopPending(
+                    f"模拟环境仍在关闭中: {simulation_id}"
+                )
+        return cls.get_run_state(simulation_id) or state
+
+    @classmethod
     def stop_simulation(cls, simulation_id: str) -> SimulationRunState:
         """停止模拟"""
+        closed = cls._close_idle_environment(simulation_id)
+        if closed is not None:
+            return closed
+
         with cls._finalization_lock(simulation_id):
             state = cls.get_run_state(simulation_id)
             if not state:
@@ -1123,7 +1327,11 @@ class SimulationRunner:
                     # 跳过没有 agent_id 的记录（非 Agent 动作）
                     if "agent_id" not in data:
                         continue
-                    
+
+                    # 跳过播种的关注图 / 最终问卷记录
+                    if data.get("phase") in NON_BEHAVIOR_PHASES:
+                        continue
+
                     # 获取平台：优先使用记录中的 platform，否则使用默认平台
                     record_platform = data.get("platform") or default_platform or ""
                     
@@ -1375,7 +1583,9 @@ class SimulationRunner:
         - twitter_simulation.db（模拟数据库）
         - reddit_simulation.db（模拟数据库）
         - env_status.json（环境状态）
-        
+        - *_profiles.effective.*（v2 每次运行重新生成的 profile 副本）
+        - final_poll.json（最终问卷结果）
+
         注意：不会删除配置文件（simulation_config.json）和 profile 文件
         
         Args:
@@ -1403,6 +1613,10 @@ class SimulationRunner:
             "twitter_simulation.db",  # Twitter 平台数据库
             "reddit_simulation.db",   # Reddit 平台数据库
             "env_status.json",        # 环境状态文件
+            # 每次运行重新生成的衍生文件
+            "twitter_profiles.effective.csv",   # 附加了行为指令的 profile 副本（v2）
+            "reddit_profiles.effective.json",
+            "final_poll.json",                  # 结束时的最终问卷结果
         ]
         
         # 要删除的目录列表（包含动作日志）

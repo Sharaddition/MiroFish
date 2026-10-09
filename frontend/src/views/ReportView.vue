@@ -54,6 +54,7 @@
         <Step4Report
           :reportId="currentReportId"
           :simulationId="simulationId"
+          :ensembleId="ensembleId"
           :systemLogs="systemLogs"
           @add-log="addLog"
           @update-status="updateStatus"
@@ -89,6 +90,8 @@ const viewMode = ref('workbench')
 // Data State
 const currentReportId = ref(route.params.reportId)
 const simulationId = ref(null)
+// 来自 Step 3 的跳转地址（报告记录可能还没保存好）；报告加载后以报告里记录的为准
+const ensembleId = ref(route.query.ensemble || null)
 const projectData = ref(null)
 const graphData = ref(null)
 const graphLoading = ref(false)
@@ -151,6 +154,8 @@ const loadReportData = async () => {
     if (reportRes.success && reportRes.data) {
       const reportData = reportRes.data
       simulationId.value = reportData.simulation_id
+      // 报告若基于集合运行（多次独立模拟）生成，Step 4 会在报告上方显示它的统计表
+      ensembleId.value = reportData.ensemble_id || null
 
       if (simulationId.value) {
         // 获取 simulation 信息

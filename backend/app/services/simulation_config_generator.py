@@ -20,7 +20,7 @@ from openai import OpenAI
 
 from ..config import Config
 from ..utils.logger import get_logger
-from ..utils.locale import get_language_instruction, t
+from ..utils.locale import get_language_instruction, get_locale, t
 from ..utils.openai_chat_compat import create_chat_completion, extract_chat_completion_text
 from .zep_entity_reader import EntityNode, ZepEntityReader
 
@@ -116,32 +116,60 @@ class EventConfig:
     """事件配置"""
     # 初始事件（模拟开始时的触发事件）
     initial_posts: List[Dict[str, Any]] = field(default_factory=list)
-    
-    # 定时事件（在特定时间触发的事件）
+
+    # 定时事件（用户编写的、在特定模拟小时触发的发帖）。
+    # 生成器永远不会自动填入：让LLM凭空编造未来事件，会把虚构的事实注入预测。
+    # 条目格式：{"id", "at_sim_hour", "poster_agent_id", "poster_type", "content",
+    #            "source": "user|llm_suggested", "enabled"}
     scheduled_events: List[Dict[str, Any]] = field(default_factory=list)
-    
-    # 热点话题关键词
+
+    # LLM 给出的候选事件（最多3条）。始终是 enabled=False、source="llm_suggested"，
+    # 仅供用户参考/采纳，绝不会被运行器执行。
+    suggested_events: List[Dict[str, Any]] = field(default_factory=list)
+
+    # 热点话题关键词（运行时仅用于指标中的关键词提及统计，不会注入Agent）
     hot_topics: List[str] = field(default_factory=list)
-    
-    # 舆论引导方向
+
+    # 议题短语（≤15词），用于 Agent 的行为指令（"关于<议题>，你目前倾向..."）
+    topic: str = ""
+
+    # 生成器对舆论走向的"假设"。不会给到任何 Agent（否则预测会变成循环论证），
+    # 只作为待检验的假设交给报告 Agent。
     narrative_direction: str = ""
 
 
 @dataclass
 class PlatformConfig:
-    """平台特定配置"""
+    """平台特定配置
+
+    recency_weight / popularity_weight / relevance_weight / viral_threshold 只是为了
+    能读取旧配置而保留：OASIS 的推荐系统没有这些旋钮，运行器从不读取它们，所以 v2
+    配置不再生成它们。echo_chamber_strength 现在真正生效（决定播种关注图的同立场聚集度）。
+    """
     platform: str  # twitter or reddit
-    
-    # 推荐算法权重
+
+    # 推荐算法权重（旧配置，v2 不再生成）
     recency_weight: float = 0.4  # 时间新鲜度
     popularity_weight: float = 0.3  # 热度
     relevance_weight: float = 0.3  # 相关性
-    
-    # 病毒传播阈值（达到多少互动后触发扩散）
+
+    # 病毒传播阈值（旧配置，v2 不再生成）
     viral_threshold: int = 10
-    
-    # 回声室效应强度（相似观点聚集程度）
+
+    # 回声室效应强度（相似观点聚集程度，决定播种关注图的同立场偏好）
     echo_chamber_strength: float = 0.5
+
+
+#: 平台配置里仅旧版本才有的键（v2 配置不输出）
+LEGACY_PLATFORM_KEYS = ("recency_weight", "popularity_weight", "relevance_weight", "viral_threshold")
+
+#: 当前生成器输出的行为版本（运行器据此决定使用 v1 还是 v2 语义）
+CURRENT_BEHAVIOR_VERSION = 2
+
+VALID_STANCES = ("supportive", "opposing", "neutral", "observer")
+TOPIC_MAX_WORDS = 15
+TOPIC_MAX_CHARS = 120
+MAX_SUGGESTED_EVENTS = 3
 
 
 @dataclass
@@ -169,11 +197,32 @@ class SimulationParameters:
     # LLM配置
     llm_model: str = ""
     llm_base_url: str = ""
-    
+
     # 生成元数据
     generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     generation_reasoning: str = ""  # LLM的推理说明
-    
+
+    # 行为版本：缺省/低于2 的配置按旧语义运行（见 scripts/sim_behavior.py）
+    behavior_version: int = CURRENT_BEHAVIOR_VERSION
+    # 生成配置时的界面语言；行为指令使用同一种语言
+    locale: str = ""
+    # 运行块：种子等在启动时写入（scripts 与 SimulationRunner 共用）
+    run: Dict[str, Any] = field(default_factory=lambda: {
+        "seed": None,
+        "replicate_index": None,
+        "ensemble_id": None,
+    })
+
+    def _platform_dict(self, platform_config: Optional[PlatformConfig]) -> Optional[Dict[str, Any]]:
+        if platform_config is None:
+            return None
+        data = asdict(platform_config)
+        if self.behavior_version >= CURRENT_BEHAVIOR_VERSION:
+            # 这些旋钮在 OASIS 里不存在，运行器从不读取，所以不再输出
+            for key in LEGACY_PLATFORM_KEYS:
+                data.pop(key, None)
+        return data
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         time_dict = asdict(self.time_config)
@@ -182,11 +231,14 @@ class SimulationParameters:
             "project_id": self.project_id,
             "graph_id": self.graph_id,
             "simulation_requirement": self.simulation_requirement,
+            "behavior_version": self.behavior_version,
+            "locale": self.locale,
+            "run": dict(self.run),
             "time_config": time_dict,
             "agent_configs": [asdict(a) for a in self.agent_configs],
             "event_config": asdict(self.event_config),
-            "twitter_config": asdict(self.twitter_config) if self.twitter_config else None,
-            "reddit_config": asdict(self.reddit_config) if self.reddit_config else None,
+            "twitter_config": self._platform_dict(self.twitter_config),
+            "reddit_config": self._platform_dict(self.reddit_config),
             "llm_model": self.llm_model,
             "llm_base_url": self.llm_base_url,
             "generated_at": self.generated_at,
@@ -196,6 +248,223 @@ class SimulationParameters:
     def to_json(self, indent: int = 2) -> str:
         """转换为JSON字符串"""
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
+
+#: 清洗后的 Agent 字段默认值（LLM 漏填或填错时使用）
+AGENT_FIELD_DEFAULTS = {
+    "activity_level": 0.5,
+    "posts_per_hour": 0.5,
+    "comments_per_hour": 1.0,
+    "response_delay_min": 5,
+    "response_delay_max": 60,
+    "sentiment_bias": 0.0,
+    "stance": "neutral",
+    "influence_weight": 1.0,
+}
+DEFAULT_ACTIVE_HOURS = list(range(9, 23))
+#: 每小时发帖/评论频率上限（再大也没有意义：激活概率本来就封顶 0.95）
+MAX_RATE_PER_HOUR = 100.0
+
+
+def _as_float(value: Any, default: float) -> float:
+    """宽松地转成有限浮点数；失败返回默认值"""
+    if isinstance(value, bool):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(number) or math.isinf(number):
+        return default
+    return number
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _sanitize_agent_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """校验并钳制 LLM（或规则）生成的 Agent 行为字段。
+
+    运行器现在会真正使用这些字段，所以坏值（超范围的情感倾向、未知的立场、
+    min > max 的响应延迟 ...）必须在这里被修正，而不是进入模拟。
+
+    - stance 必须是 supportive/opposing/neutral/observer，否则为 neutral
+    - activity_level 在 [0, 1]；sentiment_bias 在 [-1, 1]；influence_weight 在 [0.1, 5]
+    - posts_per_hour / comments_per_hour >= 0
+    - 0 <= response_delay_min <= response_delay_max（分钟）
+    - active_hours 是 0-23 的整数列表（空/非法则用默认时段）
+    """
+    cfg = cfg or {}
+    d = AGENT_FIELD_DEFAULTS
+
+    stance = str(cfg.get("stance") or d["stance"]).strip().lower()
+    if stance not in VALID_STANCES:
+        stance = d["stance"]
+
+    delay_min = max(0.0, _as_float(cfg.get("response_delay_min"), d["response_delay_min"]))
+    delay_max = max(delay_min, _as_float(cfg.get("response_delay_max"), d["response_delay_max"]))
+
+    raw_hours = cfg.get("active_hours")
+    hours = set()
+    if isinstance(raw_hours, (list, tuple, set)):
+        for hour in raw_hours:
+            number = _as_float(hour, -1)
+            if number == int(number) and 0 <= number <= 23:
+                hours.add(int(number))
+    active_hours = sorted(hours) if hours else list(DEFAULT_ACTIVE_HOURS)
+
+    return {
+        "activity_level": _clamp(_as_float(cfg.get("activity_level"), d["activity_level"]), 0.0, 1.0),
+        "posts_per_hour": _clamp(_as_float(cfg.get("posts_per_hour"), d["posts_per_hour"]), 0.0, MAX_RATE_PER_HOUR),
+        "comments_per_hour": _clamp(_as_float(cfg.get("comments_per_hour"), d["comments_per_hour"]), 0.0, MAX_RATE_PER_HOUR),
+        "active_hours": active_hours,
+        "response_delay_min": int(round(delay_min)),
+        "response_delay_max": int(round(delay_max)),
+        "sentiment_bias": _clamp(_as_float(cfg.get("sentiment_bias"), d["sentiment_bias"]), -1.0, 1.0),
+        "stance": stance,
+        "influence_weight": _clamp(_as_float(cfg.get("influence_weight"), d["influence_weight"]), 0.1, 5.0),
+    }
+
+
+def clean_topic(topic: Any, simulation_requirement: str) -> str:
+    """议题短语：≤15个词、≤120个字符；LLM 没给出可用值时退回需求原文的前120个字符。"""
+    if isinstance(topic, str):
+        words = topic.split()
+        if words:
+            cleaned = " ".join(words[:TOPIC_MAX_WORDS])
+            return cleaned[:TOPIC_MAX_CHARS].strip()
+    return (simulation_requirement or "").strip()[:TOPIC_MAX_CHARS]
+
+
+def sanitize_suggested_events(
+    events: Any, total_hours: float
+) -> List[Dict[str, Any]]:
+    """把 LLM 给出的候选事件清洗成最多3条、禁用、来源为 llm_suggested 的条目。"""
+    if not isinstance(events, list):
+        return []
+    last_hour = max(0.0, float(total_hours or 0) - 1)
+    cleaned: List[Dict[str, Any]] = []
+    for item in events:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        hour = _clamp(_as_float(item.get("at_sim_hour"), 0.0), 0.0, last_hour)
+        cleaned.append({
+            "id": f"sug_{len(cleaned) + 1}",
+            "at_sim_hour": int(hour) if hour == int(hour) else hour,
+            "poster_type": str(item.get("poster_type") or "Unknown"),
+            "content": content.strip(),
+            "source": "llm_suggested",
+            "enabled": False,
+        })
+        if len(cleaned) >= MAX_SUGGESTED_EVENTS:
+            break
+    return cleaned
+
+
+def _agent_field(agent: Any, name: str, default: Any = None) -> Any:
+    """读取 Agent 配置字段（兼容 dataclass 对象和字典）"""
+    if isinstance(agent, dict):
+        return agent.get(name, default)
+    return getattr(agent, name, default)
+
+
+def assign_poster_agents(
+    posts: List[Dict[str, Any]],
+    agent_configs: List[Any],
+    preserve_fields: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    为帖子/事件分配发布者 Agent（根据 poster_type 匹配最合适的 agent_id）
+
+    初始帖子、候选事件和用户新增的定时事件共用这一套匹配逻辑。agent_configs 可以是
+    AgentActivityConfig 对象，也可以是 simulation_config.json 里的字典。
+    preserve_fields=False 时只保留 content / poster_type / poster_agent_id（初始帖子的旧格式）；
+    为 True 时保留条目的所有其他字段。
+    """
+    if not posts:
+        return []
+
+    # 按实体类型建立 agent 索引
+    agents_by_type: Dict[str, List[Any]] = {}
+    for agent in agent_configs:
+        etype = str(_agent_field(agent, "entity_type", "") or "").lower()
+        agents_by_type.setdefault(etype, []).append(agent)
+
+    # 类型映射表（处理 LLM 可能输出的不同格式）
+    type_aliases = {
+        "official": ["official", "university", "governmentagency", "government"],
+        "university": ["university", "official"],
+        "mediaoutlet": ["mediaoutlet", "media"],
+        "student": ["student", "person"],
+        "professor": ["professor", "expert", "teacher"],
+        "alumni": ["alumni", "person"],
+        "organization": ["organization", "ngo", "company", "group"],
+        "person": ["person", "student", "alumni"],
+    }
+
+    # 记录每种类型已使用的 agent 索引，避免重复使用同一个 agent
+    used_indices: Dict[str, int] = {}
+
+    updated_posts = []
+    for post in posts:
+        poster_type = str(post.get("poster_type", "") or "").lower()
+        content = post.get("content", "")
+
+        # 尝试找到匹配的 agent
+        matched_agent_id = None
+
+        # 1. 直接匹配
+        if poster_type in agents_by_type:
+            agents = agents_by_type[poster_type]
+            idx = used_indices.get(poster_type, 0) % len(agents)
+            matched_agent_id = _agent_field(agents[idx], "agent_id")
+            used_indices[poster_type] = idx + 1
+        else:
+            # 2. 使用别名匹配
+            for alias_key, aliases in type_aliases.items():
+                if poster_type in aliases or alias_key == poster_type:
+                    for alias in aliases:
+                        if alias in agents_by_type:
+                            agents = agents_by_type[alias]
+                            idx = used_indices.get(alias, 0) % len(agents)
+                            matched_agent_id = _agent_field(agents[idx], "agent_id")
+                            used_indices[alias] = idx + 1
+                            break
+                if matched_agent_id is not None:
+                    break
+
+        # 3. 如果仍未找到，使用影响力最高的 agent
+        if matched_agent_id is None:
+            logger.warning(f"未找到类型 '{poster_type}' 的匹配 Agent，使用影响力最高的 Agent")
+            if agent_configs:
+                # 按影响力排序，选择影响力最高的
+                sorted_agents = sorted(
+                    agent_configs,
+                    key=lambda a: _agent_field(a, "influence_weight", 1.0),
+                    reverse=True,
+                )
+                matched_agent_id = _agent_field(sorted_agents[0], "agent_id")
+            else:
+                matched_agent_id = 0
+
+        if preserve_fields:
+            updated = dict(post)
+            updated["poster_agent_id"] = matched_agent_id
+        else:
+            updated = {
+                "content": content,
+                "poster_type": post.get("poster_type", "Unknown"),
+                "poster_agent_id": matched_agent_id,
+            }
+        updated_posts.append(updated)
+
+        logger.info(f"帖子分配: poster_type='{poster_type}' -> agent_id={matched_agent_id}")
+
+    return updated_posts
 
 
 class SimulationConfigGenerator:
@@ -303,7 +572,11 @@ class SimulationConfigGenerator:
         # ========== 步骤2: 生成事件配置 ==========
         report_progress(2, t('progress.generatingEventConfig'))
         event_config_result = self._generate_event_config(context, simulation_requirement, entities)
-        event_config = self._parse_event_config(event_config_result)
+        event_config = self._parse_event_config(
+            event_config_result,
+            simulation_requirement=simulation_requirement,
+            total_hours=time_config.total_simulation_hours,
+        )
         reasoning_parts.append(f"{t('progress.eventConfigLabel')}: {event_config_result.get('reasoning', t('common.success'))}")
         
         # ========== 步骤3-N: 分批生成Agent配置 ==========
@@ -331,6 +604,10 @@ class SimulationConfigGenerator:
         # ========== 为初始帖子分配发布者 Agent ==========
         logger.info("为初始帖子分配合适的发布者 Agent...")
         event_config = self._assign_initial_post_agents(event_config, all_agent_configs)
+        # 候选事件同样提前匹配好发布者，用户采纳时无需再选
+        event_config.suggested_events = assign_poster_agents(
+            event_config.suggested_events, all_agent_configs, preserve_fields=True
+        )
         assigned_count = len([p for p in event_config.initial_posts if p.get("poster_agent_id") is not None])
         reasoning_parts.append(t('progress.postAssignResult', count=assigned_count))
         
@@ -372,7 +649,9 @@ class SimulationConfigGenerator:
             reddit_config=reddit_config,
             llm_model=self.model_name,
             llm_base_url=self.base_url,
-            generation_reasoning=" | ".join(reasoning_parts)
+            generation_reasoning=" | ".join(reasoning_parts),
+            behavior_version=CURRENT_BEHAVIOR_VERSION,
+            locale=get_locale(),
         )
         
         logger.info(f"模拟配置生成完成: {len(params.agent_configs)} 个Agent配置")
@@ -687,8 +966,10 @@ class SimulationConfigGenerator:
 ## 任务
 请生成事件配置JSON：
 - 提取热点话题关键词
-- 描述舆论发展方向
+- 提炼议题短语 topic：不超过15个词，中立地描述讨论的对象（例如"HEGAM 分拆上市后的股价反应"），**不要包含结论或预测**；它会被写进每个 Agent 的人设里
+- 描述舆论发展方向（这只是一个待检验的假设，不会提供给任何 Agent）
 - 设计初始帖子内容，**每个帖子必须指定 poster_type（发布者类型）**
+- 可选：给出最多3个"值得检验的假设性后续事件" suggested_events（at_sim_hour 是模拟开始后的小时数）。它们只是供用户参考的候选，默认不会执行；请只写合理的、符合背景的假设，**不要把虚构的内容写成既成事实**
 
 **重要**: poster_type 必须从上面的"可用实体类型"中选择，这样初始帖子才能分配给合适的 Agent 发布。
 例如：官方声明应由 Official/University 类型发布，新闻由 MediaOutlet 发布，学生观点由 Student 发布。
@@ -696,16 +977,20 @@ class SimulationConfigGenerator:
 返回JSON格式（不要markdown）：
 {{
     "hot_topics": ["关键词1", "关键词2", ...],
+    "topic": "<议题短语，不超过15个词>",
     "narrative_direction": "<舆论发展方向描述>",
     "initial_posts": [
         {{"content": "帖子内容", "poster_type": "实体类型（必须从可用类型中选择）"}},
         ...
     ],
+    "suggested_events": [
+        {{"at_sim_hour": <整数>, "poster_type": "实体类型", "content": "假设性后续事件的帖子内容"}}
+    ],
     "reasoning": "<简要说明>"
 }}"""
 
         system_prompt = "你是舆论分析专家。返回纯JSON格式。注意 poster_type 必须精确匹配可用实体类型。"
-        system_prompt = f"{system_prompt}\n\n{get_language_instruction()}\nIMPORTANT: The 'poster_type' field value MUST be in English PascalCase exactly matching the available entity types. Only 'content', 'narrative_direction', 'hot_topics' and 'reasoning' fields should use the specified language."
+        system_prompt = f"{system_prompt}\n\n{get_language_instruction()}\nIMPORTANT: The 'poster_type' field value MUST be in English PascalCase exactly matching the available entity types. Only 'content', 'topic', 'narrative_direction', 'hot_topics' and 'reasoning' fields should use the specified language."
 
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
@@ -718,12 +1003,24 @@ class SimulationConfigGenerator:
                 "reasoning": "使用默认配置"
             }
     
-    def _parse_event_config(self, result: Dict[str, Any]) -> EventConfig:
-        """解析事件配置结果"""
+    def _parse_event_config(
+        self,
+        result: Dict[str, Any],
+        simulation_requirement: str = "",
+        total_hours: float = 72,
+    ) -> EventConfig:
+        """解析事件配置结果
+
+        scheduled_events 永远为空：它只能由用户编写，LLM 不会凭空编造未来事件。
+        """
         return EventConfig(
             initial_posts=result.get("initial_posts", []),
             scheduled_events=[],
+            suggested_events=sanitize_suggested_events(
+                result.get("suggested_events"), total_hours
+            ),
             hot_topics=result.get("hot_topics", []),
+            topic=clean_topic(result.get("topic"), simulation_requirement),
             narrative_direction=result.get("narrative_direction", "")
         )
     
@@ -734,84 +1031,18 @@ class SimulationConfigGenerator:
     ) -> EventConfig:
         """
         为初始帖子分配合适的发布者 Agent
-        
-        根据每个帖子的 poster_type 匹配最合适的 agent_id
+
+        根据每个帖子的 poster_type 匹配最合适的 agent_id（逻辑见 assign_poster_agents，
+        用户新增的定时事件也共用同一套逻辑）
         """
         if not event_config.initial_posts:
             return event_config
-        
-        # 按实体类型建立 agent 索引
-        agents_by_type: Dict[str, List[AgentActivityConfig]] = {}
-        for agent in agent_configs:
-            etype = agent.entity_type.lower()
-            if etype not in agents_by_type:
-                agents_by_type[etype] = []
-            agents_by_type[etype].append(agent)
-        
-        # 类型映射表（处理 LLM 可能输出的不同格式）
-        type_aliases = {
-            "official": ["official", "university", "governmentagency", "government"],
-            "university": ["university", "official"],
-            "mediaoutlet": ["mediaoutlet", "media"],
-            "student": ["student", "person"],
-            "professor": ["professor", "expert", "teacher"],
-            "alumni": ["alumni", "person"],
-            "organization": ["organization", "ngo", "company", "group"],
-            "person": ["person", "student", "alumni"],
-        }
-        
-        # 记录每种类型已使用的 agent 索引，避免重复使用同一个 agent
-        used_indices: Dict[str, int] = {}
-        
-        updated_posts = []
-        for post in event_config.initial_posts:
-            poster_type = post.get("poster_type", "").lower()
-            content = post.get("content", "")
-            
-            # 尝试找到匹配的 agent
-            matched_agent_id = None
-            
-            # 1. 直接匹配
-            if poster_type in agents_by_type:
-                agents = agents_by_type[poster_type]
-                idx = used_indices.get(poster_type, 0) % len(agents)
-                matched_agent_id = agents[idx].agent_id
-                used_indices[poster_type] = idx + 1
-            else:
-                # 2. 使用别名匹配
-                for alias_key, aliases in type_aliases.items():
-                    if poster_type in aliases or alias_key == poster_type:
-                        for alias in aliases:
-                            if alias in agents_by_type:
-                                agents = agents_by_type[alias]
-                                idx = used_indices.get(alias, 0) % len(agents)
-                                matched_agent_id = agents[idx].agent_id
-                                used_indices[alias] = idx + 1
-                                break
-                    if matched_agent_id is not None:
-                        break
-            
-            # 3. 如果仍未找到，使用影响力最高的 agent
-            if matched_agent_id is None:
-                logger.warning(f"未找到类型 '{poster_type}' 的匹配 Agent，使用影响力最高的 Agent")
-                if agent_configs:
-                    # 按影响力排序，选择影响力最高的
-                    sorted_agents = sorted(agent_configs, key=lambda a: a.influence_weight, reverse=True)
-                    matched_agent_id = sorted_agents[0].agent_id
-                else:
-                    matched_agent_id = 0
-            
-            updated_posts.append({
-                "content": content,
-                "poster_type": post.get("poster_type", "Unknown"),
-                "poster_agent_id": matched_agent_id
-            })
-            
-            logger.info(f"初始帖子分配: poster_type='{poster_type}' -> agent_id={matched_agent_id}")
-        
-        event_config.initial_posts = updated_posts
+
+        event_config.initial_posts = assign_poster_agents(
+            event_config.initial_posts, agent_configs
+        )
         return event_config
-    
+
     def _generate_agent_configs_batch(
         self,
         context: str,
@@ -888,20 +1119,23 @@ class SimulationConfigGenerator:
             if not cfg:
                 cfg = self._generate_agent_config_by_rule(entity)
             
+            # 运行器会真正使用这些字段，所以先校验并钳制 LLM 的输出
+            cfg = _sanitize_agent_config(cfg)
+
             config = AgentActivityConfig(
                 agent_id=agent_id,
                 entity_uuid=entity.uuid,
                 entity_name=entity.name,
                 entity_type=entity.get_entity_type() or "Unknown",
-                activity_level=cfg.get("activity_level", 0.5),
-                posts_per_hour=cfg.get("posts_per_hour", 0.5),
-                comments_per_hour=cfg.get("comments_per_hour", 1.0),
-                active_hours=cfg.get("active_hours", list(range(9, 23))),
-                response_delay_min=cfg.get("response_delay_min", 5),
-                response_delay_max=cfg.get("response_delay_max", 60),
-                sentiment_bias=cfg.get("sentiment_bias", 0.0),
-                stance=cfg.get("stance", "neutral"),
-                influence_weight=cfg.get("influence_weight", 1.0)
+                activity_level=cfg["activity_level"],
+                posts_per_hour=cfg["posts_per_hour"],
+                comments_per_hour=cfg["comments_per_hour"],
+                active_hours=cfg["active_hours"],
+                response_delay_min=cfg["response_delay_min"],
+                response_delay_max=cfg["response_delay_max"],
+                sentiment_bias=cfg["sentiment_bias"],
+                stance=cfg["stance"],
+                influence_weight=cfg["influence_weight"]
             )
             configs.append(config)
         

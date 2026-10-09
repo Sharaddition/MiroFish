@@ -54,6 +54,8 @@
         <Step3Simulation
           :simulationId="currentSimulationId"
           :maxRounds="maxRounds"
+          :runs="runs"
+          :ensembleId="ensembleId"
           :minutesPerRound="minutesPerRound"
           :projectData="projectData"
           :graphData="graphData"
@@ -94,6 +96,9 @@ const viewMode = ref('split')
 const currentSimulationId = ref(route.params.simulationId)
 // 直接在初始化时从 query 参数获取 maxRounds，确保子组件能立即获取到值
 const maxRounds = ref(route.query.maxRounds ? parseInt(route.query.maxRounds) : null)
+// 运行次数大于 1 时进入集合运行模式；ensemble 是地址栏里的集合运行ID（刷新后继续同一个）
+const runs = ref(route.query.runs ? (parseInt(route.query.runs) || 1) : 1)
+const ensembleId = ref(route.query.ensemble || null)
 const minutesPerRound = ref(30) // 默认每轮30分钟
 const projectData = ref(null)
 const graphData = ref(null)

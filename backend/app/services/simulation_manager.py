@@ -76,6 +76,15 @@ class SimulationState:
     
     # 错误信息
     error: Optional[str] = None
+
+    # 集合运行：副本模拟属于哪个集合、是第几个副本（普通模拟两者都为 None）
+    ensemble_id: Optional[str] = None
+    replicate_index: Optional[int] = None
+
+    @property
+    def is_replicate(self) -> bool:
+        """是否是某个集合运行克隆出来的副本模拟"""
+        return self.ensemble_id is not None
     
     def to_dict(self) -> Dict[str, Any]:
         """完整状态字典（内部使用）"""
@@ -98,6 +107,8 @@ class SimulationState:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "error": self.error,
+            "ensemble_id": self.ensemble_id,
+            "replicate_index": self.replicate_index,
         }
     
     def get_default_platform(self) -> str:
@@ -200,6 +211,8 @@ class SimulationManager:
             created_at=data.get("created_at", datetime.now().isoformat()),
             updated_at=data.get("updated_at", datetime.now().isoformat()),
             error=data.get("error"),
+            ensemble_id=data.get("ensemble_id"),
+            replicate_index=data.get("replicate_index"),
         )
         
         self._simulations[simulation_id] = state
@@ -480,8 +493,16 @@ class SimulationManager:
         """获取模拟状态"""
         return self._load_simulation_state(simulation_id)
     
-    def list_simulations(self, project_id: Optional[str] = None) -> List[SimulationState]:
-        """列出所有模拟"""
+    def list_simulations(
+        self,
+        project_id: Optional[str] = None,
+        include_replicates: bool = False,
+    ) -> List[SimulationState]:
+        """列出所有模拟
+
+        集合运行克隆出的副本模拟默认不列出（它们只是集合的内部产物，会淹没列表）；
+        include_replicates=True 时一并返回。
+        """
         simulations = []
         
         if os.path.exists(self.SIMULATION_DATA_DIR):
@@ -491,8 +512,16 @@ class SimulationManager:
                 if sim_id.startswith('.') or not os.path.isdir(sim_path):
                     continue
                 
-                state = self._load_simulation_state(sim_id)
+                try:
+                    state = self._load_simulation_state(sim_id)
+                except (ValueError, OSError) as error:
+                    # One unreadable state.json (e.g. zero-filled by a crash) must
+                    # not take the whole simulation list down with it.
+                    logger.warning(f"跳过无法读取的模拟目录 {sim_id}: {error}")
+                    continue
                 if state:
+                    if state.is_replicate and not include_replicates:
+                        continue
                     if project_id is None or state.project_id == project_id:
                         simulations.append(state)
         
