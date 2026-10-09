@@ -379,6 +379,7 @@
     "simulationNotFound": "Simulation not found: {id}",
     "projectMissingRequirement": "Project missing simulation requirement (simulation_requirement)",
     "prepareStarted": "Preparation task started. Query progress via /api/simulation/prepare/status.",
+    "prepareAlreadyRunning": "This simulation is already being prepared. Following the running task instead of starting another.",
     "alreadyPrepared": "Preparation already complete. No need to regenerate.",
     "notStartedPrepare": "Preparation not started. Please call /api/simulation/prepare.",
     "taskCompletedPrepared": "Task completed (preparation already exists)",

@@ -393,6 +393,30 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
         return False, {"reason": f"读取状态文件失败: {str(e)}"}
 
 
+# A prepare task that has not reported progress for this long is treated as dead, so it cannot block preparing forever
+PREPARE_TASK_STALE_SECONDS = 30 * 60
+
+
+def _running_prepare_task(simulation_id):
+    """The unfinished prepare task of this simulation (as a dict), or None."""
+    from datetime import datetime
+    from ..models.task import TaskManager
+
+    now = datetime.now()
+    for task in TaskManager().list_tasks(task_type="simulation_prepare"):
+        if task["status"] not in ("pending", "processing"):
+            continue
+        if (task.get("metadata") or {}).get("simulation_id") != simulation_id:
+            continue
+        try:
+            idle = (now - datetime.fromisoformat(task["updated_at"])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            idle = 0
+        if idle <= PREPARE_TASK_STALE_SECONDS:
+            return task
+    return None
+
+
 @simulation_bp.route('/prepare', methods=['POST'])
 def prepare_simulation():
     """
@@ -461,7 +485,26 @@ def prepare_simulation():
         # 检查是否强制重新生成
         force_regenerate = data.get('force_regenerate', False)
         logger.info(f"开始处理 /prepare 请求: simulation_id={simulation_id}, force_regenerate={force_regenerate}")
-        
+
+        # A second request while the first is still running (a page reload, a double click) must not start a
+        # duplicate: it would reset the "prepared" flags under the running task and overwrite its files.
+        running = _running_prepare_task(simulation_id)
+        if running:
+            logger.info(f"模拟 {simulation_id} 已有准备任务在运行 ({running['task_id']})，不再重复启动")
+            return jsonify({
+                "success": True,
+                "data": {
+                    "simulation_id": simulation_id,
+                    "task_id": running["task_id"],
+                    "status": "preparing",
+                    "message": t('api.prepareAlreadyRunning'),
+                    "already_prepared": False,
+                    "already_running": True,
+                    "expected_entities_count": state.entities_count,
+                    "entity_types": state.entity_types
+                }
+            })
+
         # 检查是否已经准备完成（避免重复生成）
         if not force_regenerate:
             logger.debug(f"检查模拟 {simulation_id} 是否已准备完成...")

@@ -379,6 +379,7 @@
     "simulationNotFound": "模拟不存在: {id}",
     "projectMissingRequirement": "项目缺少模拟需求描述 (simulation_requirement)",
     "prepareStarted": "准备任务已启动，请通过 /api/simulation/prepare/status 查询进度",
+    "prepareAlreadyRunning": "该模拟正在准备中，已改为跟踪正在运行的任务，不再重复启动。",
     "alreadyPrepared": "已有完成的准备工作，无需重复生成",
     "notStartedPrepare": "尚未开始准备，请调用 /api/simulation/prepare 开始",
     "taskCompletedPrepared": "任务已完成（准备工作已存在）",
