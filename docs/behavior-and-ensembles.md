@@ -58,6 +58,22 @@ simulation is ready (not started): `PUT /api/simulation/<id>/scheduled-events`.
 Set `BEHAVIOR_V2_ENABLED=false` in `.env` to force the legacy behavior for every simulation without touching any
 config. It is an emergency switch and defaults to on.
 
+### Preparing a simulation with a slow model
+
+Step 2 asks the model for the time settings, the opening posts and the agent settings (15 agents per request). With a
+slow model or provider one of those requests can take minutes.
+
+- Each request waits at most `LLM_REQUEST_TIMEOUT` seconds (default 300, set it in `.env`; raise it for a slow local
+  model). After that it is tried again, up to 3 attempts, with a short pause that is longer when the provider
+  answers 402 or 429. The preparation page shows which step it is on and why a request is being repeated, and the
+  backend log has one line per attempt.
+- If the model's answer for an agent is unusable (for example an entry without `agent_id`), only that agent gets the
+  rule-based defaults. The rest of the batch is kept.
+- An opening post names the kind of agent that should publish it (`poster_type`). The prompt lists the allowed
+  types; if the model writes something else, the post goes to an agent whose type or name is close enough
+  (`Official` → `GovernmentOfficial`, a name such as `Ministry of Home Affairs`), and otherwise to the most
+  influential agents one after another, so that not every post comes from the same account.
+
 ---
 
 ## 2. Seeds

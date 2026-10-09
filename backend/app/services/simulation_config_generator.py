@@ -12,11 +12,14 @@
 
 import json
 import math
-from typing import Dict, Any, List, Optional, Callable
+import re
+import time
+from typing import Dict, Any, Iterable, List, Optional, Callable
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
-from openai import OpenAI
+import httpx
+from openai import APITimeoutError, OpenAI
 
 from ..config import Config
 from ..utils.logger import get_logger
@@ -372,6 +375,77 @@ def _agent_field(agent: Any, name: str, default: Any = None) -> Any:
     return getattr(agent, name, default)
 
 
+# 配置里的 LLM_REQUEST_TIMEOUT 无效（<=0）时使用
+DEFAULT_LLM_REQUEST_TIMEOUT = 300.0
+
+# 太短的字符串（如 "gov"）做包含匹配会误伤别的类型/实体，只对不短于此长度的字符串启用
+MIN_FUZZY_MATCH_CHARS = 5
+
+# 类型映射表（处理 LLM 可能输出的不同格式）；键和值都是 _compact() 之后的形式
+POSTER_TYPE_ALIASES = {
+    "official": ["official", "university", "governmentagency", "government"],
+    "university": ["university", "official"],
+    "mediaoutlet": ["mediaoutlet", "media"],
+    "student": ["student", "person"],
+    "professor": ["professor", "expert", "teacher"],
+    "alumni": ["alumni", "person"],
+    "organization": ["organization", "ngo", "company", "group"],
+    "person": ["person", "student", "alumni"],
+}
+
+
+def _compact(text: Any) -> str:
+    """小写并去掉空格、下划线和标点，使 'Government Official'、'government_official'、'GovernmentOfficial' 相等"""
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(text or "").lower())
+
+
+def _long_enough(compact_text: str) -> bool:
+    """包含匹配的最短长度（汉字信息密度高，2个字即可）"""
+    if re.search(r"[\u4e00-\u9fff]", compact_text):
+        return len(compact_text) >= 2
+    return len(compact_text) >= MIN_FUZZY_MATCH_CHARS
+
+
+def _match_by_entity_name(
+    poster_type: str, agent_configs: List[Any], exact_only: bool
+) -> Optional[Any]:
+    """poster_type 写成了某个实体的名字（模型经常这样做）时，直接选中那个实体；返回 agent_id"""
+    best = None
+    best_score = 0
+    for agent in agent_configs:
+        name = _compact(_agent_field(agent, "entity_name", ""))
+        if not name:
+            continue
+        if name == poster_type:
+            score = 3
+        elif (
+            not exact_only
+            and _long_enough(min(name, poster_type, key=len))
+            and (name in poster_type or poster_type in name)
+        ):
+            score = 2
+        else:
+            continue
+        if score > best_score:  # 分数相同时先出现的 Agent 优先
+            best, best_score = agent, score
+    return None if best is None else _agent_field(best, "agent_id")
+
+
+def _match_type_by_containment(
+    poster_type: str, agents_by_type: Dict[str, List[Any]]
+) -> Optional[str]:
+    """'official' 对 'governmentofficial'、'corporate' 对 'corporateentity' 这类包含关系；返回类型键"""
+    for type_key in agents_by_type:
+        if not type_key:
+            continue
+        if (
+            _long_enough(min(type_key, poster_type, key=len))
+            and (type_key in poster_type or poster_type in type_key)
+        ):
+            return type_key
+    return None
+
+
 def assign_poster_agents(
     posts: List[Dict[str, Any]],
     agent_configs: List[Any],
@@ -384,6 +458,14 @@ def assign_poster_agents(
     AgentActivityConfig 对象，也可以是 simulation_config.json 里的字典。
     preserve_fields=False 时只保留 content / poster_type / poster_agent_id（初始帖子的旧格式）；
     为 True 时保留条目的所有其他字段。
+
+    匹配顺序（大小写、空格、下划线都不敏感）：
+    1. 与某个实体类型完全相同（同类型有多个 Agent 时轮流使用）
+    2. 别名（如 Media -> MediaOutlet）
+    3. 与某个实体名称完全相同
+    4. 与某个实体类型互相包含（如 Official -> GovernmentOfficial）
+    5. 与某个实体名称互相包含（如 'Department of Telecommunications' -> 'Department of Telecommunications (DoT)'）
+    6. 都不匹配时，按影响力从高到低轮流选 Agent，而不是让所有帖子都落在同一个 Agent 上
     """
     if not posts:
         return []
@@ -391,65 +473,78 @@ def assign_poster_agents(
     # 按实体类型建立 agent 索引
     agents_by_type: Dict[str, List[Any]] = {}
     for agent in agent_configs:
-        etype = str(_agent_field(agent, "entity_type", "") or "").lower()
+        etype = _compact(_agent_field(agent, "entity_type", ""))
         agents_by_type.setdefault(etype, []).append(agent)
 
-    # 类型映射表（处理 LLM 可能输出的不同格式）
-    type_aliases = {
-        "official": ["official", "university", "governmentagency", "government"],
-        "university": ["university", "official"],
-        "mediaoutlet": ["mediaoutlet", "media"],
-        "student": ["student", "person"],
-        "professor": ["professor", "expert", "teacher"],
-        "alumni": ["alumni", "person"],
-        "organization": ["organization", "ngo", "company", "group"],
-        "person": ["person", "student", "alumni"],
-    }
+    # 影响力从高到低；权重相同时保持原有顺序
+    by_influence = sorted(
+        agent_configs,
+        key=lambda a: _as_float(_agent_field(a, "influence_weight", 1.0), 1.0),
+        reverse=True,
+    )
 
     # 记录每种类型已使用的 agent 索引，避免重复使用同一个 agent
     used_indices: Dict[str, int] = {}
+    fallback_count = 0
+
+    def take_from_type(type_key: str) -> Any:
+        agents = agents_by_type[type_key]
+        idx = used_indices.get(type_key, 0) % len(agents)
+        used_indices[type_key] = idx + 1
+        return _agent_field(agents[idx], "agent_id")
 
     updated_posts = []
     for post in posts:
-        poster_type = str(post.get("poster_type", "") or "").lower()
+        raw_type = post.get("poster_type", "") or ""
+        poster_type = _compact(raw_type)
         content = post.get("content", "")
 
-        # 尝试找到匹配的 agent
         matched_agent_id = None
 
-        # 1. 直接匹配
-        if poster_type in agents_by_type:
-            agents = agents_by_type[poster_type]
-            idx = used_indices.get(poster_type, 0) % len(agents)
-            matched_agent_id = _agent_field(agents[idx], "agent_id")
-            used_indices[poster_type] = idx + 1
-        else:
-            # 2. 使用别名匹配
-            for alias_key, aliases in type_aliases.items():
-                if poster_type in aliases or alias_key == poster_type:
-                    for alias in aliases:
-                        if alias in agents_by_type:
-                            agents = agents_by_type[alias]
-                            idx = used_indices.get(alias, 0) % len(agents)
-                            matched_agent_id = _agent_field(agents[idx], "agent_id")
-                            used_indices[alias] = idx + 1
-                            break
-                if matched_agent_id is not None:
-                    break
+        if poster_type:
+            # 1. 直接匹配
+            if poster_type in agents_by_type:
+                matched_agent_id = take_from_type(poster_type)
 
-        # 3. 如果仍未找到，使用影响力最高的 agent
+            # 2. 使用别名匹配
+            if matched_agent_id is None:
+                for alias_key, aliases in POSTER_TYPE_ALIASES.items():
+                    if poster_type in aliases or alias_key == poster_type:
+                        for alias in aliases:
+                            if alias in agents_by_type:
+                                matched_agent_id = take_from_type(alias)
+                                break
+                    if matched_agent_id is not None:
+                        break
+
+            # 3. 写成了实体名称
+            if matched_agent_id is None:
+                matched_agent_id = _match_by_entity_name(poster_type, agent_configs, exact_only=True)
+
+            # 4. 与实体类型互相包含
+            if matched_agent_id is None:
+                type_key = _match_type_by_containment(poster_type, agents_by_type)
+                if type_key is not None:
+                    matched_agent_id = take_from_type(type_key)
+
+            # 5. 与实体名称互相包含
+            if matched_agent_id is None:
+                matched_agent_id = _match_by_entity_name(poster_type, agent_configs, exact_only=False)
+
+        # 6. 仍未找到：按影响力轮流选择
         if matched_agent_id is None:
-            logger.warning(f"未找到类型 '{poster_type}' 的匹配 Agent，使用影响力最高的 Agent")
-            if agent_configs:
-                # 按影响力排序，选择影响力最高的
-                sorted_agents = sorted(
-                    agent_configs,
-                    key=lambda a: _agent_field(a, "influence_weight", 1.0),
-                    reverse=True,
-                )
-                matched_agent_id = _agent_field(sorted_agents[0], "agent_id")
+            if by_influence:
+                matched_agent_id = _agent_field(by_influence[fallback_count % len(by_influence)], "agent_id")
+                fallback_count += 1
             else:
                 matched_agent_id = 0
+            known_types = sorted({
+                str(_agent_field(a, "entity_type", "") or "") for a in agent_configs
+            })
+            logger.warning(
+                f"未找到类型 '{raw_type}' 的匹配 Agent（可用类型: {', '.join(known_types)}），"
+                f"改用影响力排名靠前的 Agent {matched_agent_id}"
+            )
 
         if preserve_fields:
             updated = dict(post)
@@ -462,9 +557,48 @@ def assign_poster_agents(
             }
         updated_posts.append(updated)
 
-        logger.info(f"帖子分配: poster_type='{poster_type}' -> agent_id={matched_agent_id}")
+        logger.info(f"帖子分配: poster_type='{raw_type}' -> agent_id={matched_agent_id}")
 
     return updated_posts
+
+
+# --- 模型返回的 Agent 配置 -----------------------------------------------------
+
+def _as_agent_id(value: Any) -> Optional[int]:
+    """模型返回的 agent_id 可能是 3、3.0 或 "3"；其他情况（含缺失、布尔值）返回 None"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and re.fullmatch(r"\s*\d+\s*", value):
+        return int(value)
+    return None
+
+
+def index_agent_configs(result: Any, expected_ids: Iterable[int]) -> Dict[int, Dict[str, Any]]:
+    """
+    把模型返回的 agent_configs 按 agent_id 建索引。
+
+    不是对象、缺少 agent_id、或 agent_id 不属于本批 Agent 的条目只会被丢弃，其余条目照常使用；
+    丢弃条目对应的 Agent 之后由规则生成配置，而不是让整批配置作废。
+    """
+    entries = result.get("agent_configs") if isinstance(result, dict) else None
+    if not isinstance(entries, list):
+        return {}
+    expected = set(expected_ids)
+    indexed: Dict[int, Dict[str, Any]] = {}
+    dropped = 0
+    for entry in entries:
+        agent_id = _as_agent_id(entry.get("agent_id")) if isinstance(entry, dict) else None
+        if agent_id is None or agent_id not in expected:
+            dropped += 1
+            continue
+        indexed[agent_id] = entry
+    if dropped:
+        logger.warning(f"模型返回的 agent_configs 中有 {dropped} 个条目缺少有效的 agent_id，已忽略")
+    return indexed
 
 
 class SimulationConfigGenerator:
@@ -496,18 +630,27 @@ class SimulationConfigGenerator:
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model_name: Optional[str] = None
+        model_name: Optional[str] = None,
+        request_timeout: Optional[float] = None,
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model_name = model_name or Config.LLM_MODEL_NAME
-        
+        timeout = float(request_timeout or Config.LLM_REQUEST_TIMEOUT)
+        self.request_timeout = timeout if timeout > 0 else DEFAULT_LLM_REQUEST_TIMEOUT
+        # 供界面显示重试/等待状态；由 generate_config 设置
+        self._status_note: Optional[Callable[[str], None]] = None
+
         if not self.api_key:
             raise ValueError("LLM_API_KEY 未配置")
-        
+
+        # 单次请求最长等待 request_timeout 秒；SDK 自带的静默重试关闭，
+        # 由 _call_llm_with_retry 自己重试并把原因写进日志和进度信息
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
+            timeout=httpx.Timeout(self.request_timeout, connect=min(15.0, self.request_timeout)),
+            max_retries=0,
         )
     
     def generate_config(
@@ -545,13 +688,22 @@ class SimulationConfigGenerator:
         num_batches = math.ceil(len(entities) / self.AGENTS_PER_BATCH)
         total_steps = 3 + num_batches  # 时间配置 + 事件配置 + N批Agent + 平台配置
         current_step = 0
-        
+        current_message = ""
+
         def report_progress(step: int, message: str):
-            nonlocal current_step
+            nonlocal current_step, current_message
             current_step = step
+            current_message = message
             if progress_callback:
                 progress_callback(step, total_steps, message)
             logger.info(f"[{step}/{total_steps}] {message}")
+
+        def report_wait_note(note: str):
+            """同一步骤内的状态（例如模型超时后重试），只更新进度信息"""
+            if progress_callback:
+                progress_callback(current_step, total_steps, f"{current_message} ({note})")
+
+        self._status_note = report_wait_note
         
         # 1. 构建基础上下文信息
         context = self._build_context(
@@ -655,7 +807,8 @@ class SimulationConfigGenerator:
         )
         
         logger.info(f"模拟配置生成完成: {len(params.agent_configs)} 个Agent配置")
-        
+
+        self._status_note = None
         return params
     
     def _build_context(
@@ -711,14 +864,33 @@ class SimulationConfigGenerator:
         
         return "\n".join(lines)
     
+    # 重试前的停顿（秒）；服务商限流（HTTP 402/429）时多等一会儿
+    RETRY_PAUSES = (2, 4)
+    THROTTLED_RETRY_PAUSES = (5, 15)
+
+    def _note(self, text: str) -> None:
+        """把状态写进进度信息；进度汇报出错绝不能影响配置生成"""
+        if self._status_note is None:
+            return
+        try:
+            self._status_note(text)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"进度信息更新失败: {exc}")
+
     def _call_llm_with_retry(self, prompt: str, system_prompt: str) -> Dict[str, Any]:
-        """带重试的LLM调用，包含JSON修复逻辑"""
-        import re
-        
+        """带重试的LLM调用，包含JSON修复逻辑。单次请求最多等待 request_timeout 秒。"""
         max_attempts = 3
         last_error = None
-        
+        reason = ""
+        pauses = self.RETRY_PAUSES
+
         for attempt in range(max_attempts):
+            if attempt:
+                self._note(t('progress.llmRetrying', attempt=attempt + 1, total=max_attempts, reason=reason))
+            logger.info(
+                f"调用模型生成配置 (第 {attempt + 1}/{max_attempts} 次，最长等待 {self.request_timeout:.0f} 秒)"
+            )
+            started = time.monotonic()
             try:
                 response = create_chat_completion(
                     self.client,
@@ -731,36 +903,47 @@ class SimulationConfigGenerator:
                     temperature=0.7 - (attempt * 0.1),  # 每次重试降低温度
                     # 不设置max_tokens，让LLM自由发挥
                 )
-                
+
                 content = extract_chat_completion_text(response)
                 finish_reason = response.choices[0].finish_reason
-                
+
                 # 检查是否被截断
                 if finish_reason == 'length':
                     logger.warning(f"LLM输出被截断 (attempt {attempt+1})")
                     content = self._fix_truncated_json(content)
-                
+
                 # 尝试解析JSON
                 try:
                     return json.loads(content)
                 except json.JSONDecodeError as e:
                     logger.warning(f"JSON解析失败 (attempt {attempt+1}): {str(e)[:80]}")
-                    
+
                     # 尝试修复JSON
                     fixed = self._try_fix_config_json(content)
                     if fixed:
                         return fixed
-                    
+
                     last_error = e
-                    
+                    reason = t('progress.llmBadJson')
+
             except Exception as e:
-                logger.warning(f"LLM调用失败 (attempt {attempt+1}): {str(e)[:80]}")
+                elapsed = time.monotonic() - started
+                if isinstance(e, APITimeoutError):
+                    reason = t('progress.llmNoReply', seconds=int(self.request_timeout))
+                    logger.warning(
+                        f"LLM调用超时 (attempt {attempt+1}/{max_attempts}): {elapsed:.0f} 秒内没有收到完整回复"
+                    )
+                else:
+                    reason = str(e)[:200]
+                    logger.warning(f"LLM调用失败 (attempt {attempt+1}/{max_attempts}, {elapsed:.0f}s): {reason}")
+                    if getattr(e, "status_code", None) in (402, 429):
+                        pauses = self.THROTTLED_RETRY_PAUSES
                 last_error = e
-                import time
-                time.sleep(2 * (attempt + 1))
-        
+                if attempt + 1 < max_attempts:
+                    time.sleep(pauses[min(attempt, len(pauses) - 1)])
+
         raise last_error or Exception("LLM调用失败")
-    
+
     def _fix_truncated_json(self, content: str) -> str:
         """修复被截断的JSON"""
         content = content.strip()
@@ -932,11 +1115,6 @@ class SimulationConfigGenerator:
     ) -> Dict[str, Any]:
         """生成事件配置"""
         
-        # 获取可用的实体类型列表，供 LLM 参考
-        entity_types_available = list(set(
-            e.get_entity_type() or "Unknown" for e in entities
-        ))
-        
         # 为每种类型列出代表性实体名称
         type_examples = {}
         for e in entities:
@@ -947,9 +1125,12 @@ class SimulationConfigGenerator:
                 type_examples[etype].append(e.name)
         
         type_info = "\n".join([
-            f"- {t}: {', '.join(examples)}" 
+            f"- {t}: {', '.join(examples)}"
             for t, examples in type_examples.items()
         ])
+        # poster_type 只能取这些值（按出现顺序，去重）
+        allowed_types = list(type_examples)
+        allowed_types_text = " / ".join(allowed_types)
         
         # 使用配置的上下文截断长度
         context_truncated = context[:self.EVENT_CONFIG_CONTEXT_LENGTH]
@@ -960,7 +1141,7 @@ class SimulationConfigGenerator:
 
 {context_truncated}
 
-## 可用实体类型及示例
+## 可用实体类型及示例（poster_type 只能取下面的类型名）
 {type_info}
 
 ## 任务
@@ -971,8 +1152,8 @@ class SimulationConfigGenerator:
 - 设计初始帖子内容，**每个帖子必须指定 poster_type（发布者类型）**
 - 可选：给出最多3个"值得检验的假设性后续事件" suggested_events（at_sim_hour 是模拟开始后的小时数）。它们只是供用户参考的候选，默认不会执行；请只写合理的、符合背景的假设，**不要把虚构的内容写成既成事实**
 
-**重要**: poster_type 必须从上面的"可用实体类型"中选择，这样初始帖子才能分配给合适的 Agent 发布。
-例如：官方声明应由 Official/University 类型发布，新闻由 MediaOutlet 发布，学生观点由 Student 发布。
+**重要**: poster_type 只能是下列类型名之一，并且必须逐字照抄：{allowed_types_text}
+不要写受众、职业或角色（例如 "retail traders"、"analysts"），也不要写某个实体的名字；想让某一类声音发帖时，选最接近的上述类型，这样初始帖子才能分配给合适的 Agent 发布。
 
 返回JSON格式（不要markdown）：
 {{
@@ -980,11 +1161,11 @@ class SimulationConfigGenerator:
     "topic": "<议题短语，不超过15个词>",
     "narrative_direction": "<舆论发展方向描述>",
     "initial_posts": [
-        {{"content": "帖子内容", "poster_type": "实体类型（必须从可用类型中选择）"}},
+        {{"content": "帖子内容", "poster_type": "<{allowed_types_text}>"}},
         ...
     ],
     "suggested_events": [
-        {{"at_sim_hour": <整数>, "poster_type": "实体类型", "content": "假设性后续事件的帖子内容"}}
+        {{"at_sim_hour": <整数>, "poster_type": "<{allowed_types_text}>", "content": "假设性后续事件的帖子内容"}}
     ],
     "reasoning": "<简要说明>"
 }}"""
@@ -1102,12 +1283,17 @@ class SimulationConfigGenerator:
         system_prompt = "你是社交媒体行为分析专家。返回纯JSON，配置需符合模拟场景中目标用户群体的作息习惯。"
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}\nIMPORTANT: The 'stance' field value MUST be one of the English strings: 'supportive', 'opposing', 'neutral', 'observer'. All JSON field names and numeric values must remain unchanged. Only natural language text fields should use the specified language."
 
+        expected_ids = [start_idx + i for i in range(len(entities))]
         try:
             result = self._call_llm_with_retry(prompt, system_prompt)
-            llm_configs = {cfg["agent_id"]: cfg for cfg in result.get("agent_configs", [])}
+            llm_configs = index_agent_configs(result, expected_ids)
         except Exception as e:
             logger.warning(f"Agent配置批次LLM生成失败: {e}, 使用规则生成")
             llm_configs = {}
+        else:
+            missing_ids = [i for i in expected_ids if i not in llm_configs]
+            if missing_ids:
+                logger.warning(f"模型返回的配置缺少 Agent {missing_ids}，这些 Agent 使用规则生成")
         
         # 构建AgentActivityConfig对象
         configs = []

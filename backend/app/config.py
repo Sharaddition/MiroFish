@@ -28,7 +28,9 @@ class Config:
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
-    
+    # 配置生成阶段单次LLM请求的最长等待时间（秒）；超时后重试，而不是无限等待
+    LLM_REQUEST_TIMEOUT = float(os.environ.get('LLM_REQUEST_TIMEOUT', '300'))
+
     # Zep配置
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
     

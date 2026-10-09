@@ -433,6 +433,17 @@ class SimulationManager:
                     total=3
                 )
             
+            def config_progress(step: int, total_steps: int, message: str):
+                # 生成器的每一步（时间、事件、每批Agent、平台）映射到本阶段 30%-70% 的进度区间，
+                # 这样一次耗时很久的模型调用也能在界面上看到当前做到哪一步
+                if progress_callback:
+                    stage_progress = 30 + int(40 * max(step - 1, 0) / max(total_steps, 1))
+                    progress_callback(
+                        "generating_config", stage_progress, message,
+                        current=step,
+                        total=total_steps
+                    )
+
             sim_params = config_generator.generate_config(
                 simulation_id=simulation_id,
                 project_id=state.project_id,
@@ -441,7 +452,8 @@ class SimulationManager:
                 document_text=document_text,
                 entities=filtered.entities,
                 enable_twitter=state.enable_twitter,
-                enable_reddit=state.enable_reddit
+                enable_reddit=state.enable_reddit,
+                progress_callback=config_progress
             )
             
             if progress_callback:
