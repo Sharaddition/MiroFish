@@ -381,3 +381,21 @@ def test_ensemble_progress_includes_each_runs_live_status(tmp_path, monkeypatch)
     assert first["health"]["level"] == "error" and first["health"]["kind"] == "http_402"
     assert first["activity"]["twitter"]["failed"] == 5
     assert second["health"] is None and second["activity"] == {} and second["poll"] is None
+
+
+def test_a_line_still_being_written_is_read_on_the_next_poll(tmp_path):
+    path = tmp_path / "actions.jsonl"
+    state = SimulationRunState(simulation_id="sim_partial")
+    first = json.dumps({"event_type": "round_start", "round": 1, "active_agent_ids": [1, 2]}) + "\n"
+    second = json.dumps({"event_type": "round_end", "round": 1, "actions_count": 2, "failed_count": 0})
+    path.write_bytes((first + second[:20]).encode("utf-8"))
+
+    position = SimulationRunner._read_action_log(str(path), 0, state, "twitter")
+    assert position == len(first.encode("utf-8"))
+    assert state.current_round == 0
+
+    with open(path, "ab") as handle:
+        handle.write((second[20:] + "\n").encode("utf-8"))
+    position = SimulationRunner._read_action_log(str(path), position, state, "twitter")
+    assert state.current_round == 1
+    assert position == path.stat().st_size

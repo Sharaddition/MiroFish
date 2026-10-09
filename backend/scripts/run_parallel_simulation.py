@@ -211,6 +211,8 @@ REDDIT_ACTIONS = [
 
 
 # IPC相关常量
+MAX_CONSECUTIVE_STEP_FAILURES = 5  # env.step errors in a row before a platform gives up
+
 IPC_COMMANDS_DIR = "ipc_commands"
 IPC_RESPONSES_DIR = "ipc_responses"
 ENV_STATUS_FILE = "env_status.json"
@@ -1251,6 +1253,7 @@ async def _run_platform_simulation(
 
     start_time = datetime.now()
     failure_tracker = sim_runtime.FailureTracker()
+    consecutive_step_failures = 0
 
     for round_num in range(total_rounds):
         # 检查是否收到退出信号
@@ -1308,10 +1311,26 @@ async def _run_platform_simulation(
                 )
             ) if action_logger else None,
         )
+        step_error: Optional[Exception] = None
         try:
             await result.env.step(actions)
+            consecutive_step_failures = 0
+        except Exception as error:
+            # One bad round (e.g. a locked database) must not end the run and
+            # throw away the rounds already played. Give up only when the
+            # environment keeps failing.
+            step_error = error
+            consecutive_step_failures += 1
+            log_info(f"第 {round_num + 1} 轮 env.step 失败 ({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES}): {error}")
+            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES:
+                raise
         finally:
             round_failures = failure_tracker.end_round()
+        if step_error is not None:
+            kind, message = sim_runtime.classify_error(step_error)
+            if action_logger:
+                action_logger.log_agent_error(round_num + 1, None, kind, message)
+            round_failures = round_failures + [{"agent_id": None, "kind": kind, "message": message}]
         if round_failures:
             log_info(
                 f"第 {round_num + 1} 轮: {len(round_failures)}/{len(active_agents)} 个Agent的模型调用失败 "
