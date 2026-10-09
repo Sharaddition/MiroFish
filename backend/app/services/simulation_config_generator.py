@@ -24,6 +24,7 @@ from openai import APITimeoutError, OpenAI
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.locale import get_language_instruction, get_locale, t
+from ..utils.llm_client import clean_chat_text
 from ..utils.openai_chat_compat import create_chat_completion, extract_chat_completion_text
 from .zep_entity_reader import EntityNode, ZepEntityReader
 
@@ -904,7 +905,8 @@ class SimulationConfigGenerator:
                     # 不设置max_tokens，让LLM自由发挥
                 )
 
-                content = extract_chat_completion_text(response)
+                # reasoning models (Gemma <thought>, DeepSeek <think>) answer after their notes
+                content = clean_chat_text(extract_chat_completion_text(response))
                 finish_reason = response.choices[0].finish_reason
 
                 # 检查是否被截断

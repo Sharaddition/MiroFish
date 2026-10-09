@@ -81,6 +81,9 @@ def _clean_chat_text(content: str) -> str:
     return cleaned.strip()
 
 
+clean_chat_text = _clean_chat_text  # public name for the other JSON-reading services
+
+
 def _contains_additional_json_container(content: str) -> bool:
     """Return True when trailing text embeds another JSON object or array."""
 

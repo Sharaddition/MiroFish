@@ -408,3 +408,16 @@ def test_the_event_prompt_names_the_allowed_poster_types():
     assert "Organization / GovernmentOfficial" in prompt
     assert '"poster_type": "<Organization / GovernmentOfficial>"' in prompt
     assert "Official/University" not in prompt   # the old example named types that may not exist
+
+
+def test_a_reasoning_block_before_the_json_costs_no_retry(monkeypatch):
+    """Gemma writes <thought>…{braces}…</thought> and then a fenced answer."""
+    reply = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content='<thought>plan: {"a": [1</thought>```json\n{"ok": 3}\n```'),
+            finish_reason="stop",
+        )]
+    )
+    calls, sleeps = script_llm(monkeypatch, [reply])
+    assert make_generator()._call_llm_with_retry("p", "s") == {"ok": 3}
+    assert len(calls) == 1 and sleeps == []
