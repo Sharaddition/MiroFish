@@ -29,6 +29,7 @@
       <section class="block">
         <h3 class="block-subtitle">{{ $t('ensemble.questionsTitle') }}</h3>
         <p class="hint">{{ $t('ensemble.questionsDesc') }}</p>
+        <p v-if="ensemble.questions_source === 'fallback'" class="notice warn">{{ $t('ensemble.fallbackNote') }}</p>
 
         <p v-if="questions.length === 0" class="empty-note">{{ $t('ensemble.noQuestions') }}</p>
 

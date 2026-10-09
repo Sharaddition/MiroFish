@@ -785,6 +785,7 @@
       "stopping": "Stopping ensemble {id}...",
       "finished": "Ensemble {id} finished: {status}.",
       "reportStarted": "Report generation started for ensemble {id}: {reportId}"
-    }
+    },
+    "fallbackNote": "The model could not propose questions for this scenario, so a generic stance question is shown. Edit it, or add your own below, before you start."
   }
 }

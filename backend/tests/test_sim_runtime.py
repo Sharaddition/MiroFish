@@ -327,26 +327,98 @@ def test_final_poll_keeps_unparseable_replies_and_flags_them(tmp_path):
     assert len(env.steps) == 1  # a reply that does not parse is not retried
 
 
+def final_poll(env, db, n, **kwargs):
+    """run_final_poll with no real waiting between retries."""
+    kwargs.setdefault("retry_delays", (0, 0, 0))
+    return run(sim_runtime.run_final_poll(
+        env, env.agent_graph, db, poll_config(n), POLL_QUESTIONS, log=lambda _m: None, **kwargs,
+    ))
+
+
 def test_final_poll_retries_agents_that_never_replied(tmp_path):
     db = str(tmp_path / "p.db")
     make_db(db)
     env = FakeEnv([0, 1, 2], db, answers=json_answers(range(3)), fail_on_step={0})
-    rows = run(sim_runtime.run_final_poll(env, env.agent_graph, db, poll_config(), POLL_QUESTIONS, log=lambda _m: None))
+    rows = final_poll(env, db, 3, chunk_size=10)
 
     assert len(env.steps) == 2  # the failed step, then one retry
     assert all(r["parse_ok"] for r in rows)
     assert all("error" not in r for r in rows)
 
 
-def test_final_poll_records_the_error_for_agents_that_stay_silent(tmp_path):
+def test_final_poll_keeps_retrying_with_pauses_until_everyone_replied(tmp_path, monkeypatch):
+    """A throttling provider ("402: retry after in-flight requests settle") needs time, not an instant retry."""
     db = str(tmp_path / "p.db")
     make_db(db)
+    pauses = []
+
+    async def record_pause(seconds):
+        pauses.append(seconds)
+
+    monkeypatch.setattr(sim_runtime.asyncio, "sleep", record_pause)
     env = FakeEnv([0, 1], db, answers=json_answers(range(2)), fail_on_step={0, 1})
-    rows = run(sim_runtime.run_final_poll(env, env.agent_graph, db, poll_config(2), POLL_QUESTIONS, log=lambda _m: None))
+    rows = final_poll(env, db, 2, chunk_size=10, retry_delays=(5, 15, 30))
+
+    assert len(env.steps) == 3  # the first pass and the first retry failed, the second retry worked
+    assert pauses == [5, 15]  # it did not wait for a third retry it never needed
+    assert all(r["parse_ok"] for r in rows)
+
+
+def test_final_poll_records_the_error_for_agents_that_stay_silent(tmp_path, monkeypatch):
+    db = str(tmp_path / "p.db")
+    make_db(db)
+    pauses = []
+
+    async def record_pause(seconds):
+        pauses.append(seconds)
+
+    monkeypatch.setattr(sim_runtime.asyncio, "sleep", record_pause)
+    env = FakeEnv([0, 1], db, answers=json_answers(range(2)), fail_on_step=set(range(100)))
+    rows = final_poll(env, db, 2, chunk_size=10, retry_delays=(1, 1, 1))
 
     assert [r["parse_ok"] for r in rows] == [False, False]
     assert all(r["raw"] is None and "provider exploded" in r["error"] for r in rows)
-    assert len(env.steps) == 2  # exactly one retry, no loop
+    assert pauses == [1, 1, 1]  # three retries, then it gives up
+
+
+def test_final_poll_asks_fewer_agents_at_once_with_every_retry(tmp_path):
+    db = str(tmp_path / "p.db")
+    make_db(db)
+    env = FakeEnv(range(4), db, answers=json_answers(range(4)), fail_on_step=set(range(100)))
+    final_poll(env, db, 4, chunk_size=4, retry_delays=(0, 0))
+
+    assert [len(step) for step in env.steps] == [4, 2, 2, 1, 1, 1, 1]
+
+
+def test_final_poll_treats_an_empty_reply_like_no_reply(tmp_path):
+    db = str(tmp_path / "p.db")
+    make_db(db)
+
+    class FlakyEnv(FakeEnv):
+        """Agent 1 answers with an empty text the first time."""
+
+        async def step(self, actions):
+            self.steps.append(actions)
+            for agent in actions:
+                first = agent.agent_id == 1 and len(self.steps) == 1
+                answer = "" if first else json_answers([agent.agent_id])[agent.agent_id]
+                add_trace(self.db_path, agent.agent_id, "interview", json.dumps({"prompt": "p", "response": answer}))
+
+    env = FlakyEnv([0, 1, 2], db)
+    rows = final_poll(env, db, 3, chunk_size=10)
+
+    assert len(env.steps) == 2 and [len(step) for step in env.steps] == [3, 1]  # only agent 1 was asked again
+    assert all(r["parse_ok"] for r in rows)
+
+
+def test_final_poll_reports_an_empty_reply_that_never_improves(tmp_path):
+    db = str(tmp_path / "p.db")
+    make_db(db)
+    env = FakeEnv([0], db, answers={0: "   "})
+    rows = final_poll(env, db, 1, chunk_size=10, retry_delays=(0,))
+
+    assert rows[0]["parse_ok"] is False and rows[0]["error"] == "the model returned an empty reply"
+    assert len(env.steps) == 2
 
 
 def test_final_poll_chunks_agents(tmp_path):

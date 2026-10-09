@@ -97,7 +97,8 @@ would pollute it.
 2. **Step 3** does not start anything yet. It creates the ensemble and shows a review screen:
    - the **estimated cost** (a conservative upper bound on model calls),
    - the **end-of-run questions** (1 to 3, editable now and locked once the runs start; if you did not supply any,
-     one LLM call proposes them from your simulation requirement),
+     one LLM call proposes them from your simulation requirement; if the model's proposal cannot be used the screen
+     says so and shows a generic stance question instead),
    - a note on what a seed does and does not do.
    Press *Start N runs* when you are happy.
 3. While it runs, each run shows its status, round progress and seed. *Stop all runs* stops the running ones and
@@ -124,6 +125,10 @@ A `choice` question can carry a `stance_map` (option → supportive / opposing /
 excluded from the statistics but counted in the *parse rate*. The poll is tagged `poll` and is never counted as agent
 behavior.
 
+Agents that give no answer at all (the request failed, or the model sent an empty text) are asked again after pauses of
+5, 15 and 30 seconds, a few at a time and then one at a time, because the usual cause is a provider that throttles
+(HTTP 402 "retry after in-flight requests settle", or 429). What stays silent after that shows up as a lower parse rate.
+
 ### What you get
 
 `summary.json` (machine-readable) and `summary.md` (readable, opening with the caveat) in
@@ -133,7 +138,8 @@ behavior.
   contributed), and for probability questions the share of runs whose mean was above 50;
 - stance drift (when a stance question exists);
 - behavior per run: total actions, posts, comments, likes, reposts, follows, the share of posts by starting stance,
-  the agents most often among the top 3 by engagement received, hot-topic mentions, actions per round;
+  the agents most often among the top 3 by engagement received, hot-topic mentions (a post or comment counts when
+  it contains the phrase, or every word of a multi-word phrase), actions per round;
 - a row per run: seed, status, parse rate, actions.
 
 Setup follows, scheduled-event posts and the poll are excluded from the behavior counts, so they do not skew them.
@@ -163,6 +169,8 @@ The limits are 50 runs, up to 4 runs at once (the UI uses 1 at a time) and a man
 - If the backend restarts while an ensemble is running, runs whose processes are gone are marked failed with the
   error `interrupted`, and runs that had not started are marked stopped. Whatever finished is then aggregated under the
   same rules. Ensembles are not resumed automatically.
+- A run's `simulation.log` says why agents stayed silent. With "402" or "429" errors the provider is throttling or out
+  of credit: run fewer rounds, or add credit, and try again.
 - Replicates are hidden from the simulation list and history; `?include_replicates=true` shows them.
 
 ### Files

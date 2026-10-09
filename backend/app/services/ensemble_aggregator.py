@@ -15,6 +15,9 @@ median, p90, max). Conventions worth knowing:
 * Percentiles use linear interpolation between order statistics.
 * An agent whose poll reply did not parse (``parse_ok`` false) is excluded from
   every statistic but counted in the parse rate.
+* A hot topic is mentioned by a post or comment that contains the phrase, or (for a phrase of
+  several words) all of its words: generated topics are phrases like "injectable formulations
+  approval" that people rarely repeat word for word.
 * Behavioural metrics skip bookkeeping records: the seeded follow graph
   (``phase: setup``), scheduled-event posts (``phase: injected``) and poll
   records (``phase: poll``). Legacy logs that recorded each initial post twice
@@ -26,9 +29,10 @@ median, p90, max). Conventions worth knowing:
 import json
 import math
 import os
+import re
 import sqlite3
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..utils.atomic_write import write_json_atomic, write_text_atomic
 
@@ -322,6 +326,27 @@ def _engagement_from_db(
     return engagement
 
 
+_TOPIC_WORD = re.compile(r"\w+(?:[-']\w+)*", re.UNICODE)
+
+
+def topic_matcher(topic: str) -> Callable[[str], bool]:
+    """A predicate telling whether a lower-cased text mentions ``topic``.
+
+    It matches the whole phrase, or, for a phrase of several words, every word of it
+    (words shorter than three characters are ignored unless they contain a digit).
+    A single word or an unspaced phrase (Chinese, say) matches as a plain substring.
+    """
+    phrase = topic.lower().strip()
+    words = [w for w in _TOPIC_WORD.findall(phrase) if len(w) >= 3 or any(ch.isdigit() for ch in w)]
+
+    def mentions(text: str) -> bool:
+        if phrase in text:
+            return True
+        return len(words) >= 2 and all(word in text for word in words)
+
+    return mentions
+
+
 def behavior_metrics(sim_dir: str, config: Mapping[str, Any], rounds: Optional[int] = None) -> Dict[str, Any]:
     """Counts, per-round series, stance-group shares, engagement and keyword mentions."""
     agents = {
@@ -344,6 +369,7 @@ def behavior_metrics(sim_dir: str, config: Mapping[str, Any], rounds: Optional[i
 
     hot_topics = [str(t) for t in ((config.get("event_config") or {}).get("hot_topics") or []) if str(t).strip()]
     mentions = {topic: [0] * total_rounds for topic in hot_topics}
+    matchers = {topic: topic_matcher(topic) for topic in hot_topics}
 
     for record in records:
         action = record.get("action_type")
@@ -373,7 +399,7 @@ def behavior_metrics(sim_dir: str, config: Mapping[str, Any], rounds: Optional[i
             args = record.get("action_args") or {}
             text = " ".join(str(args.get(k) or "") for k in ("content", "quote_content")).lower()
             for topic in hot_topics:
-                if topic.lower() in text:
+                if matchers[topic](text):
                     mentions[topic][round_num - 1] += 1
 
     total_posts = totals["posts"]

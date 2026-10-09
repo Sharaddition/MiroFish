@@ -162,6 +162,98 @@ def validate_outcome_questions(questions: Any) -> Tuple[List[Dict[str, Any]], Li
     return normalized, errors
 
 
+def _shorten(text: Any, limit: int) -> str:
+    """``text`` on one line and at most ``limit`` characters, cut at a word boundary when that costs little."""
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    if space >= limit // 2:  # do not throw away more than half of it just to end on a word
+        cut = cut[:space]
+    return cut.rstrip(" ,;:-")
+
+
+def _repair_question(item: Any) -> Optional[Dict[str, Any]]:
+    """One model-proposed question made to fit the schema, or None when it cannot be saved."""
+    if not isinstance(item, dict):
+        return None
+    text = item.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    qtype = str(item.get("type") or "").strip().lower()
+    if qtype not in QUESTION_TYPES:
+        return None
+
+    repaired: Dict[str, Any] = {"text": _shorten(text, MAX_TEXT_CHARS), "type": qtype}
+    qid = item.get("id")
+    if isinstance(qid, str) and _ID_PATTERN.match(qid.strip()) and qid.strip() not in _RESERVED_IDS:
+        repaired["id"] = qid.strip()
+
+    if qtype == "choice":
+        options: List[str] = []
+        seen = set()
+        for option in item.get("options") if isinstance(item.get("options"), list) else []:
+            if isinstance(option, bool) or not isinstance(option, (str, int, float)):
+                continue
+            label = _shorten(option, MAX_OPTION_CHARS)
+            if label and label.lower() not in seen:
+                seen.add(label.lower())
+                options.append(label)
+        options = options[:MAX_OPTIONS]
+        if len(options) < MIN_OPTIONS:
+            return None
+        repaired["options"] = options
+
+        stance_map = item.get("stance_map")
+        if isinstance(stance_map, dict):
+            by_lower = {option.lower(): option for option in options}
+            mapping = {}
+            for option, stance in stance_map.items():
+                canonical = by_lower.get(str(option).strip().lower())
+                stance = str(stance).strip().lower()
+                if canonical is not None and stance in STANCES:
+                    mapping[canonical] = stance
+            if mapping:
+                repaired["stance_map"] = mapping
+    elif qtype == "number":
+        unit = _shorten(item.get("unit") or "", MAX_UNIT_CHARS)
+        if not unit:
+            return None
+        repaired["unit"] = unit
+    return repaired
+
+
+def repair_derived_questions(raw: Any) -> List[Dict[str, Any]]:
+    """The usable questions in a model's reply (``{"questions": [...]}`` or a bare list), at most three.
+
+    Models ignore length limits and make small slips: a unit that is a whole phrase, a repeated
+    option, a ``stance_map`` entry for an option they renamed. Rejecting the whole reply for one of
+    those throws away questions that were fine, so each question is tidied on its own (over-long
+    text is shortened, repeated or empty options are removed, ``stance_map`` entries that match no
+    option are dropped) and a question that still cannot be valid is skipped. Repeated or reserved
+    ids are dropped so the validator numbers them afresh. Questions typed in by a user never go
+    through this: they are validated strictly and the errors shown.
+    """
+    items = raw.get("questions") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+    repaired: List[Dict[str, Any]] = []
+    used_ids = set()
+    for item in items:
+        question = _repair_question(item)
+        if question is None:
+            continue
+        if question.get("id") in used_ids:
+            question.pop("id")
+        elif "id" in question:
+            used_ids.add(question["id"])
+        repaired.append(question)
+        if len(repaired) == MAX_QUESTIONS:
+            break
+    return repaired
+
+
 def default_outcome_questions(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """A generic stance question, used when none were supplied and none could be derived.
 
@@ -206,6 +298,8 @@ participants themselves would answer them. Prefer:
 - one `choice` question about the participant's current stance, with 2-5 options and a `stance_map`
   that maps each option onto one of: supportive, opposing, neutral.
 Do not leak any expected outcome into the wording of the questions.
+Limits: a question's text is at most {MAX_TEXT_CHARS} characters, an option label at most
+{MAX_OPTION_CHARS}, and a `number` question's `unit` at most {MAX_UNIT_CHARS} (for example "%", "points", "days").
 
 Return JSON of this shape:
 {{"questions": [
@@ -227,10 +321,13 @@ def derive_outcome_questions(
     """Derive outcome questions from the simulation requirement with one LLM call.
 
     Returns ``(questions, source)`` where source is ``"llm"`` or ``"fallback"``.
-    The reply is schema-validated (at most 3 questions); on any LLM or schema
-    failure a generic stance question is returned instead, so creating an
-    ensemble never fails just because the model misbehaved. The caller shows the
-    questions to the user, who can edit them before the ensemble starts.
+    The reply is tidied question by question (``repair_derived_questions``: a
+    unit that is too long is shortened, a question that cannot be saved is
+    skipped), at most 3 questions are kept and they are schema-validated. When
+    nothing usable is left, or the LLM call fails, a generic stance question is
+    returned instead, so creating an ensemble never fails just because the model
+    misbehaved. The caller shows the questions to the user, who can edit them
+    before the ensemble starts.
     """
     if llm_json is None:
         client = LLMClient()
@@ -240,9 +337,12 @@ def derive_outcome_questions(
 
     try:
         reply = llm_json(_derivation_messages(config))
-        questions, errors = validate_outcome_questions(reply.get("questions"))
+        proposed = reply.get("questions") if isinstance(reply, dict) else reply
+        questions, errors = validate_outcome_questions(repair_derived_questions(reply))
         if errors or not questions:
-            raise ValueError("; ".join(errors) or "the model returned no questions")
+            raise ValueError("; ".join(errors) or "the model returned no usable questions")
+        if isinstance(proposed, list) and len(questions) < len(proposed):
+            logger.info(f"Outcome questions: kept {len(questions)} of the {len(proposed)} the model proposed")
         return questions, "llm"
     except Exception as error:
         logger.warning(f"Could not derive outcome questions, using the default: {error}")

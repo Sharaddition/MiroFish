@@ -13,10 +13,16 @@ stack installed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+#: Seconds to wait before each retry of the agents that gave no reply to the final poll. A provider
+#: that throttles ("402: retry after in-flight requests settle", "429") needs the pause: retrying at
+#: once only meets the same wall. The number of delays is the number of retries.
+FINAL_POLL_RETRY_DELAYS: Tuple[float, ...] = (5.0, 15.0, 30.0)
 
 
 def _action_classes():
@@ -262,15 +268,19 @@ async def run_final_poll(
     config: Mapping[str, Any],
     questions: Sequence[Mapping[str, Any]],
     *,
-    chunk_size: int = 10,
+    chunk_size: int = 5,
+    retry_delays: Sequence[float] = FINAL_POLL_RETRY_DELAYS,
     log: Callable[[str], None] = print,
 ) -> List[Dict[str, Any]]:
     """Interview every agent once on the outcome questions.
 
     All agents get the same JSON-only prompt (``sim_poll.build_poll_prompt``).
-    They are interviewed in chunks so one failing request only costs a chunk,
-    and agents that produced no reply at all get a single retry. Replies that
-    cannot be parsed are kept (``parse_ok: false``) rather than dropped, so the
+    They are interviewed in chunks so one failing request only costs a chunk
+    and only ``chunk_size`` requests are in flight at once. Agents that gave no
+    reply at all (no row, or an empty one) are retried after each pause in
+    ``retry_delays``, in ever smaller chunks (down to one at a time), until all
+    have answered or the delays run out. Replies that cannot be parsed are kept
+    (``parse_ok: false``) rather than dropped, and are not retried, so the
     ensemble can report a parse rate. Returns the ``final_poll.json`` rows,
     ordered by agent id.
     """
@@ -287,23 +297,26 @@ async def run_final_poll(
         env, agent_graph, db_path, prompts, chunk_size=chunk_size, log=log
     )
 
-    silent = [
-        agent_id for agent_id, result in results.items()
-        if result.get("response") is None and not result.get("unknown_agent")
-    ]
-    if silent:
-        log(f"  最终问卷: {len(silent)} 个Agent没有回复，重试一次")
+    for attempt, delay in enumerate(retry_delays, start=1):
+        silent = _silent_agents(results)
+        if not silent:
+            break
+        log(f"  最终问卷: {len(silent)} 个Agent没有回复，{delay:g}秒后重试（第 {attempt}/{len(retry_delays)} 次）")
+        if delay > 0:
+            await asyncio.sleep(delay)
         retried = await batch_interview(
             env,
             agent_graph,
             db_path,
             {agent_id: prompt for agent_id in silent},
-            chunk_size=max(1, chunk_size // 2),
+            chunk_size=max(1, chunk_size // (2 ** attempt)),
             log=log,
         )
         for agent_id, result in retried.items():
-            if result.get("response") is not None:
+            if not _is_blank(result.get("response")):
                 results[agent_id] = result
+            elif result.get("error"):
+                results[agent_id]["error"] = result["error"]  # keep the latest reason
 
     rows: List[Dict[str, Any]] = []
     for cfg in agents:
@@ -312,6 +325,9 @@ async def run_final_poll(
         response = result.get("response")
         if response is not None and not isinstance(response, str):
             response = json.dumps(response, ensure_ascii=False)
+        error = result.get("error")
+        if response is not None and not response.strip() and not error:
+            error = "the model returned an empty reply"
         rows.append(
             sim_poll.poll_row(
                 agent_id,
@@ -319,10 +335,23 @@ async def run_final_poll(
                 str(cfg.get("stance", "neutral")),
                 response,
                 questions,
-                error=result.get("error"),
+                error=error,
             )
         )
     return rows
+
+
+def _is_blank(response: Any) -> bool:
+    """No reply at all: nothing was recorded, or the model sent an empty text."""
+    return response is None or (isinstance(response, str) and not response.strip())
+
+
+def _silent_agents(results: Mapping[int, Mapping[str, Any]]) -> List[int]:
+    """The agents worth asking again (an unknown agent never will answer)."""
+    return [
+        agent_id for agent_id, result in results.items()
+        if not result.get("unknown_agent") and _is_blank(result.get("response"))
+    ]
 
 
 def write_final_poll(sim_dir: str, rows: Sequence[Mapping[str, Any]]) -> str:

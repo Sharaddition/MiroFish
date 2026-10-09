@@ -165,7 +165,6 @@ def test_questions_are_derived_with_one_llm_call():
         {"questions": "not a list"},
         {},
         {"questions": [{"text": "x", "type": "bogus"}]},
-        {"questions": [{"text": "x", "type": "probability"}] * 4},
         {"questions": [{"text": "x", "type": "choice", "options": ["only-one"]}]},
     ],
 )
@@ -189,3 +188,86 @@ def test_derivation_prompt_asks_for_the_configured_language(monkeypatch):
     monkeypatch.setattr(outcome_questions, "get_language_instruction", lambda: "Please respond in English.")
     derive_outcome_questions(CONFIG, lambda messages: (seen.append(messages), {"questions": []})[1])
     assert "Please respond in English." in seen[0][1]["content"]
+
+
+# --- a model's reply is tidied, not rejected wholesale ----------------------------------------
+
+def derive(reply):
+    return derive_outcome_questions(CONFIG, lambda _messages: reply)
+
+
+def test_an_overlong_unit_is_shortened_instead_of_discarding_every_question():
+    """Seen with a real model: 'unit is longer than 20 characters' threw away a good probability question too."""
+    questions, source = derive({"questions": [
+        {"text": "Will it close higher?", "type": "probability"},
+        {"text": "By how much?", "type": "number", "unit": "percentage points of the share price"},
+    ]})
+    assert source == "llm" and [q["type"] for q in questions] == ["probability", "number"]
+    assert len(questions[1]["unit"]) <= 20 and questions[1]["unit"] == "percentage points"
+
+
+def test_a_question_that_cannot_be_saved_is_skipped_and_the_others_are_kept():
+    questions, source = derive({"questions": [
+        {"text": "Will it close higher?", "type": "probability"},
+        {"text": "Rank these", "type": "ranking"},
+        {"text": "Pick one", "type": "choice", "options": ["only"]},
+        {"text": "How much?", "type": "number"},
+        {"text": "   ", "type": "probability"},
+        "not even an object",
+    ]})
+    assert source == "llm" and [q["text"] for q in questions] == ["Will it close higher?"]
+
+
+def test_options_are_cleaned_and_stance_map_entries_that_match_nothing_are_dropped():
+    (question,), source = derive({"questions": [{
+        "text": "Your stance?", "type": "Choice",
+        "options": ["Bullish", " bullish ", "", None, "Neutral", "x" * 100, "Bearish"],
+        "stance_map": {"BULLISH": "Supportive", "bearish": "opposing", "renamed": "opposing", "neutral": "mixed"},
+    }]})
+    assert source == "llm"
+    assert question["options"] == ["Bullish", "Neutral", "x" * 60, "Bearish"]
+    assert question["stance_map"] == {"Bullish": "supportive", "Bearish": "opposing"}
+
+
+def test_a_choice_keeps_at_most_eight_options():
+    (question,), _ = derive({"questions": [{"text": "Pick", "type": "choice", "options": [f"o{i}" for i in range(12)]}]})
+    assert question["options"] == [f"o{i}" for i in range(8)]
+
+
+def test_repeated_and_reserved_ids_are_replaced_by_fresh_ones():
+    questions, source = derive({"questions": [
+        {"id": "q1", "text": "a", "type": "probability"},
+        {"id": "q1", "text": "b", "type": "probability"},
+        {"id": "reason", "text": "c", "type": "probability"},
+    ]})
+    assert source == "llm" and [q["id"] for q in questions] == ["q1", "q2", "q3"]
+
+
+def test_more_than_three_questions_keep_the_first_three_usable_ones():
+    questions, source = derive({"questions": [
+        {"text": "skip me", "type": "bogus"},
+        *({"text": f"question {i}", "type": "probability"} for i in range(5)),
+    ]})
+    assert source == "llm" and [q["text"] for q in questions] == ["question 0", "question 1", "question 2"]
+
+
+def test_a_bare_list_is_accepted_like_the_wrapped_reply():
+    questions, source = derive([{"text": "Will it close higher?", "type": "probability"}])
+    assert source == "llm" and questions == [{"id": "q1", "text": "Will it close higher?", "type": "probability"}]
+
+
+def test_long_text_is_cut_at_a_word_boundary():
+    (question,), _ = derive({"questions": [{"text": "word " * 200, "type": "probability"}]})
+    assert len(question["text"]) <= 500 and question["text"].endswith("word")
+
+
+def test_the_prompt_states_the_length_limits():
+    seen = []
+    derive_outcome_questions(CONFIG, lambda messages: (seen.append(messages), {"questions": []})[1])
+    prompt = " ".join(seen[0][1]["content"].split())
+    assert "at most 500 characters" in prompt and "at most 60," in prompt and "at most 20 (" in prompt
+
+
+def test_questions_typed_by_a_user_are_still_validated_strictly():
+    errors = bad([{"text": "How much?", "type": "number", "unit": "u" * 21}])
+    assert any("unit is longer than 20" in message for message in errors)

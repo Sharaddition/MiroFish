@@ -16,6 +16,7 @@ from app.services.ensemble_aggregator import (
     replicate_metrics,
     stance_mapping,
     summarize,
+    topic_matcher,
     write_summary,
 )
 
@@ -449,3 +450,42 @@ def test_write_summary_writes_json_and_markdown(ensemble_dirs):
 def test_the_summary_is_json_serialisable(ensemble_dirs):
     ensemble, sims, _ = ensemble_dirs
     json.dumps(build_summary(ensemble, QUESTIONS, sims))
+
+
+# --- hot topics: the phrase, or all of its words ----------------------------------------------------
+
+def test_a_topic_matches_the_phrase_or_all_of_its_words_in_any_order():
+    mentions = topic_matcher("FTO-11 facility inspection")
+    assert mentions("monitoring the fto-11 facility inspection results")  # the phrase
+    assert mentions("the inspection of the facility in fto-11 took long")  # every word, any order
+    assert not mentions("the fto-11 plant inspection")  # 'facility' is missing
+    assert not mentions("nothing relevant here")
+
+
+def test_a_single_word_or_unspaced_topic_matches_only_as_a_substring():
+    assert topic_matcher("Demerger")("a demerger plan") and not topic_matcher("Demerger")("de merger")
+    assert topic_matcher("股价反应")("市场对股价反应强烈") and not topic_matcher("股价反应")("股价 反应")
+
+
+def test_short_words_do_not_make_a_topic_easier_or_harder_to_match():
+    mentions = topic_matcher("a risk of delay")  # only 'risk' and 'delay' count
+    assert mentions("delay is the main risk") and not mentions("a delay")
+
+
+def test_a_short_word_with_a_digit_still_counts():
+    mentions = topic_matcher("Q3 results")
+    assert mentions("results for q3 are out") and not mentions("results are out")
+
+
+def test_behaviour_metrics_count_a_post_that_has_every_word_of_a_topic(tmp_path):
+    records = [
+        act(1, 1, "CREATE_POST", content="Injectable approvals and formulations look delayed"),  # 'approvals' contains 'approval'
+        act(2, 1, "CREATE_POST", content="Formulations are fine"),
+        act(3, 2, "CREATE_COMMENT", content="No news on the injectable formulations approval"),
+        act(1, 2, "CREATE_POST", content="Unrelated"),
+    ]
+    sim_dir = make_replicate(tmp_path, "sim_topics", twitter=records,
+                             config=make_config(event_config={"hot_topics": ["injectable formulations approval"]}))
+    mentions = behavior_metrics(str(sim_dir), make_config(event_config={"hot_topics": ["injectable formulations approval"]}),
+                                rounds=2)["hot_topic_mentions"]
+    assert mentions["injectable formulations approval"] == {"total": 2, "by_round": [1, 1]}
