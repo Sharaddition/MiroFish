@@ -243,3 +243,11 @@ export const interviewAgents = (data) => {
 export const getSimulationHistory = (limit = 20) => {
   return service.get('/api/simulation/history', { params: { limit } })
 }
+
+/**
+ * 删除模拟及其项目（文件、图谱、报告、集合运行）；运行中会返回 409
+ * @param {string} simulationId
+ */
+export const deleteSimulation = (simulationId) => {
+  return service.delete(`/api/simulation/${simulationId}`)
+}

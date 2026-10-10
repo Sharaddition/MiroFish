@@ -19,6 +19,8 @@ import json
 import os
 import re
 import sqlite3
+import threading
+import time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 #: Seconds to wait before each retry of the agents that gave no reply to the final poll. A provider
@@ -137,6 +139,106 @@ def classify_error(error: Any) -> Tuple[str, str]:
     if "connection" in name or "connect" in lowered:
         return "connection", message
     return "other", message
+
+
+_FALLBACK_KINDS = {"http_402", "http_429", "auth", "http_5xx", "timeout", "connection"}
+
+
+def should_fall_back(error: BaseException) -> bool:
+    """Whether another model could succeed where this call failed (quota, size, outage, bad key).
+
+    A malformed request (HTTP 400, a bug in our code) would fail on any model, so it is not retried.
+    """
+    kind, _ = classify_error(error)
+    if kind in _FALLBACK_KINDS:
+        return True
+    status = getattr(error, "status_code", None)
+    if not isinstance(status, int):
+        match = _STATUS_RE.search(str(error))
+        status = int(next(group for group in match.groups() if group)) if match else None
+    return status == 413  # request too large for this model's per-minute token limit
+
+
+class Pacer:
+    """Spaces calls at least ``interval`` seconds apart, however many callers wait.
+
+    Each caller reserves the next free slot and sleeps until it, so the order is first come first served
+    and nobody holds a lock while sleeping. Share one pacer between everything that talks to the same
+    provider (here: the fallback model of both platforms).
+    """
+
+    def __init__(self, interval: float) -> None:
+        self.interval = max(0.0, float(interval or 0.0))
+        self._next = 0.0
+        self._lock = threading.Lock()
+
+    def reserve(self) -> float:
+        """Seconds the caller must wait before its call may start."""
+        if self.interval <= 0:
+            return 0.0
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + self.interval
+            return start - now
+
+    def wait(self) -> None:
+        delay = self.reserve()
+        if delay > 0:
+            time.sleep(delay)
+
+    async def await_turn(self) -> None:
+        delay = self.reserve()
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+
+def install_model_fallback(
+    primary: Any,
+    fallback: Any,
+    on_fallback: Optional[Callable[[BaseException], None]] = None,
+    pacer: Optional[Pacer] = None,
+) -> Any:
+    """Make ``primary`` hand a failed call to ``fallback`` (camel model backends, sync and async).
+
+    Only calls that failed in a way another model could fix (see ``should_fall_back``) are retried, once,
+    on ``fallback``; any other error, and a failure of the fallback itself, propagates unchanged.
+    """
+    original_run, original_arun = primary.run, primary.arun
+
+    def run(*args, **kwargs):
+        try:
+            return original_run(*args, **kwargs)
+        except Exception as error:
+            if not should_fall_back(error):
+                raise
+            _notify(on_fallback, error)
+            if pacer is not None:
+                pacer.wait()
+            return fallback.run(*args, **kwargs)
+
+    async def arun(*args, **kwargs):
+        try:
+            return await original_arun(*args, **kwargs)
+        except Exception as error:
+            if not should_fall_back(error):
+                raise
+            _notify(on_fallback, error)
+            if pacer is not None:
+                await pacer.await_turn()
+            return await fallback.arun(*args, **kwargs)
+
+    primary.run, primary.arun = run, arun
+    return primary
+
+
+def _notify(callback: Optional[Callable[[BaseException], None]], error: BaseException) -> None:
+    if callback is None:
+        return
+    try:
+        callback(error)
+    except Exception:
+        pass  # reporting must never break the simulation
 
 
 # id(agent) -> (tracker, agent_id) for the agents of the round that is running

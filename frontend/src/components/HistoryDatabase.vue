@@ -33,6 +33,12 @@
         <div class="card-header">
           <span class="card-id">{{ formatSimulationId(project.simulation_id) }}</span>
           <div class="card-status-icons">
+            <button
+              class="card-delete"
+              :title="$t('history.delete')"
+              :aria-label="$t('history.delete')"
+              @click.stop="askDelete(project)"
+            >×</button>
             <span 
               class="status-icon" 
               :class="{ available: project.project_id, unavailable: !project.project_id }"
@@ -86,8 +92,8 @@
         <!-- 卡片底部 -->
         <div class="card-footer">
           <div class="card-datetime">
-            <span class="card-date">{{ formatDate(project.created_at) }}</span>
-            <span class="card-time">{{ formatTime(project.created_at) }}</span>
+            <span class="card-date" :title="$t('history.updated')">{{ formatDate(project.last_activity || project.created_at) }}</span>
+            <span class="card-time">{{ formatTime(project.last_activity || project.created_at) }}</span>
           </div>
           <span class="card-progress" :class="getProgressClass(project)">
             <span class="status-dot">●</span> {{ formatRounds(project) }}
@@ -104,6 +110,24 @@
       <span class="loading-spinner"></span>
       <span class="loading-text">{{ $t('history.loadingText') }}</span>
     </div>
+
+    <!-- 删除确认 -->
+    <Teleport to="body">
+      <div v-if="deleteTarget" class="modal-overlay" @click.self="cancelDelete">
+        <div class="delete-dialog" role="alertdialog" aria-modal="true">
+          <h3 class="delete-title">{{ $t('history.deleteTitle') }}</h3>
+          <p class="delete-name">{{ getSimulationTitle(deleteTarget.simulation_requirement) }}</p>
+          <p class="delete-body">{{ $t('history.deleteBody', { count: deleteRunCount }) }}</p>
+          <p v-if="deleteError" class="delete-error">{{ $t('history.deleteFailed', { error: deleteError }) }}</p>
+          <div class="delete-actions">
+            <button class="delete-cancel" :disabled="deleting" @click="cancelDelete">{{ $t('common.cancel') }}</button>
+            <button class="delete-confirm" :disabled="deleting" @click="confirmDelete">
+              {{ deleting ? $t('history.deleting') : $t('history.deleteConfirm') }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- 历史回放详情弹窗 -->
     <Teleport to="body">
@@ -194,7 +218,7 @@
 import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { getSimulationHistory } from '../api/simulation'
+import { getSimulationHistory, deleteSimulation } from '../api/simulation'
 
 const router = useRouter()
 const route = useRoute()
@@ -439,6 +463,45 @@ const goToReport = () => {
       params: { reportId: selectedProject.value.report_id }
     })
     closeModal()
+  }
+}
+
+// 删除运行及其项目
+const deleteTarget = ref(null)
+const deleting = ref(false)
+const deleteError = ref('')
+
+// 同一项目下会一并删除的运行数量（集合运行的副本不在列表里）
+const deleteRunCount = computed(() => {
+  const target = deleteTarget.value
+  if (!target) return 0
+  if (!target.project_id) return 1
+  return projects.value.filter(p => p.project_id === target.project_id).length || 1
+})
+
+const askDelete = (project) => {
+  deleteError.value = ''
+  deleteTarget.value = project
+}
+
+const cancelDelete = () => {
+  if (deleting.value) return
+  deleteTarget.value = null
+}
+
+const confirmDelete = async () => {
+  if (!deleteTarget.value || deleting.value) return
+  deleting.value = true
+  deleteError.value = ''
+  try {
+    const response = await deleteSimulation(deleteTarget.value.simulation_id)
+    if (response && response.success === false) throw new Error(response.error)
+    deleteTarget.value = null
+    await loadHistory()
+  } catch (error) {
+    deleteError.value = error?.response?.data?.error || error?.message || String(error)
+  } finally {
+    deleting.value = false
   }
 }
 
@@ -1344,5 +1407,103 @@ onUnmounted(() => {
   letter-spacing: 0.3px;
   text-align: center;
   line-height: 1.5;
+}
+
+/* 卡片右上角的删除按钮 */
+.card-delete {
+  width: 22px;
+  height: 22px;
+  margin-right: 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--c-9ca3af);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.project-card:hover .card-delete,
+.card-delete:focus-visible {
+  opacity: 1;
+}
+
+.card-delete:hover {
+  background: var(--c-fee2e2);
+  color: var(--c-dc2626);
+}
+
+/* 删除确认弹窗 */
+.delete-dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 24px;
+  border-radius: 12px;
+  background: var(--c-ffffff);
+  border: 1px solid var(--c-e5e7eb);
+  box-shadow: 0 20px 50px var(--c-000000-a400);
+}
+
+.delete-title {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+  color: var(--c-111827);
+}
+
+.delete-name {
+  margin: 0 0 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--c-4b5563);
+}
+
+.delete-body {
+  margin: 0 0 16px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--c-6b7280);
+}
+
+.delete-error {
+  margin: 0 0 16px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--c-fee2e2);
+  color: var(--c-dc2626);
+  font-size: 0.8rem;
+  word-break: break-word;
+}
+
+.delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.delete-cancel,
+.delete-confirm {
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.delete-cancel {
+  border: 1px solid var(--c-d1d5db);
+  background: var(--c-ffffff);
+  color: var(--c-4b5563);
+}
+
+.delete-confirm {
+  border: 1px solid var(--c-dc2626);
+  background: var(--c-dc2626);
+  color: var(--c-ffffff);
+}
+
+.delete-cancel:disabled,
+.delete-confirm:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 </style>

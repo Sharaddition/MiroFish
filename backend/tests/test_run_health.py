@@ -4,6 +4,7 @@ OASIS swallows an exception from the model (it logs it and returns it), so befor
 refused every request looked like a run that was merely slow.
 """
 import asyncio
+import time
 import json
 
 import pytest
@@ -399,3 +400,97 @@ def test_a_line_still_being_written_is_read_on_the_next_poll(tmp_path):
     position = SimulationRunner._read_action_log(str(path), position, state, "twitter")
     assert state.current_round == 1
     assert position == path.stat().st_size
+
+
+# --- model fallback -------------------------------------------------------------
+
+class FakeBackend:
+    def __init__(self, name, error=None):
+        self.name, self.error, self.calls = name, error, 0
+
+    def run(self, *args, **kwargs):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return f"{self.name}-answer"
+
+    async def arun(self, *args, **kwargs):
+        return self.run(*args, **kwargs)
+
+
+class Status(Exception):
+    def __init__(self, status, text="provider said no"):
+        super().__init__(f"Error code: {status} - {text}")
+        self.status_code = status
+
+
+@pytest.mark.parametrize("error", [Status(429), Status(402), Status(500), Status(401), Status(413), TimeoutError("timed out")])
+def test_a_call_the_primary_cannot_serve_goes_to_the_fallback(error):
+    seen = []
+    primary, backup = FakeBackend("main", error), FakeBackend("boost")
+    sim_runtime.install_model_fallback(primary, backup, seen.append)
+
+    assert primary.run([]) == "boost-answer"
+    assert asyncio.run(primary.arun([])) == "boost-answer"
+    assert primary.calls == 2 and backup.calls == 2 and len(seen) == 2
+
+
+def test_a_healthy_primary_never_touches_the_fallback():
+    primary, backup = FakeBackend("main"), FakeBackend("boost")
+    sim_runtime.install_model_fallback(primary, backup)
+    assert primary.run([]) == "main-answer" and backup.calls == 0
+
+
+def test_errors_another_model_cannot_fix_are_not_retried():
+    primary, backup = FakeBackend("main", Status(400, "bad parameter")), FakeBackend("boost")
+    sim_runtime.install_model_fallback(primary, backup)
+    with pytest.raises(Status):
+        primary.run([])
+    assert backup.calls == 0
+
+
+def test_when_the_fallback_fails_too_its_error_is_raised_and_a_broken_callback_is_harmless():
+    primary, backup = FakeBackend("main", Status(429)), FakeBackend("boost", Status(413, "too large"))
+
+    def broken(error):
+        raise RuntimeError("reporting failed")
+
+    sim_runtime.install_model_fallback(primary, backup, broken)
+    with pytest.raises(Status) as raised:
+        primary.run([])
+    assert raised.value.status_code == 413
+
+
+# --- pacing the fallback ----------------------------------------------------------
+
+def test_a_pacer_hands_out_slots_one_interval_apart(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(sim_runtime.time, "monotonic", lambda: clock[0])
+    pacer = sim_runtime.Pacer(1.0)
+    assert [pacer.reserve() for _ in range(3)] == [0.0, 1.0, 2.0]   # three callers arriving together
+    clock[0] += 10                                                   # a quiet spell: no backlog
+    assert pacer.reserve() == 0.0
+
+
+def test_a_pacer_with_no_interval_never_waits():
+    assert sim_runtime.Pacer(0).reserve() == 0.0
+
+
+def test_fallback_calls_are_spaced_even_when_made_together():
+    primary, backup = FakeBackend("main", Status(429)), FakeBackend("boost")
+    started = []
+    original = backup.run
+
+    def timed(*args, **kwargs):
+        started.append(time.monotonic())
+        return original(*args, **kwargs)
+
+    backup.run = timed   # FakeBackend.arun delegates to run, so this sees every fallback call
+    sim_runtime.install_model_fallback(primary, backup, pacer=sim_runtime.Pacer(0.1))
+
+    async def together():
+        await asyncio.gather(*(primary.arun([]) for _ in range(3)))
+
+    asyncio.run(together())
+    # slots are 0.1 s apart; allow for the OS timer's granularity on each wake-up
+    assert len(started) == 3 and started[-1] - started[0] >= 0.15

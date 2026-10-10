@@ -962,6 +962,61 @@ def _get_report_id_for_simulation(simulation_id: str) -> str:
         return None
 
 
+def _last_activity(simulation) -> str:
+    """ISO time of the simulation's last change: its record's updated_at or its run state's file time."""
+    from datetime import datetime
+    latest = simulation.updated_at or simulation.created_at or ""
+    run_state_file = os.path.join(
+        SimulationManager.SIMULATION_DATA_DIR, simulation.simulation_id, "run_state.json"
+    )
+    try:
+        touched = datetime.fromtimestamp(os.path.getmtime(run_state_file)).isoformat()
+        if touched > latest:
+            latest = touched
+    except OSError:
+        pass
+    return latest
+
+
+@simulation_bp.route('/<simulation_id>', methods=['DELETE'])
+def delete_simulation_and_project(simulation_id: str):
+    """
+    Delete a simulation and everything built on it: replicates, ensembles, reports,
+    and (unless ?with_project=false) the whole project -- uploaded files, ontology,
+    Zep graph and the project's other simulations.
+
+    409 while anything involved is running or being prepared.
+    """
+    from contextlib import ExitStack
+    from .graph import GraphInUseError, _delete_cloud_graph_if_present, _project_build_lock
+    from ..services import run_deletion
+
+    with_project = request.args.get('with_project', 'true').lower() != 'false'
+    try:
+        plan = run_deletion.plan_deletion(simulation_id, with_project=with_project)
+        with ExitStack() as stack:
+            if plan.project_id:
+                stack.enter_context(_project_build_lock(plan.project_id))
+            if plan.graph_id:
+                stack.enter_context(graph_lifecycle_lock(plan.graph_id))
+            plan = run_deletion.delete_run(
+                simulation_id,
+                with_project=with_project,
+                delete_graph=_delete_cloud_graph_if_present,
+                is_preparing=lambda sim_id: _running_prepare_task(sim_id) is not None,
+            )
+        return jsonify({"success": True, "data": plan.to_dict()})
+    except run_deletion.RunNotFound:
+        return jsonify({"success": False, "error": t('api.simulationNotFound', id=simulation_id)}), 404
+    except run_deletion.RunBusy as error:
+        return jsonify({"success": False, "error": t('api.deleteRunBusy', reasons=str(error))}), 409
+    except GraphInUseError as error:
+        return jsonify({"success": False, "error": str(error)}), 409
+    except Exception as error:
+        logger.error(f"删除模拟失败: {simulation_id}, error={error}\n{traceback.format_exc()}")
+        return jsonify({"success": False, "error": str(error)}), 500
+
+
 @simulation_bp.route('/history', methods=['GET'])
 def get_simulation_history():
     """
@@ -1003,12 +1058,18 @@ def get_simulation_history():
         include_replicates = _truthy_arg(request.args.get('include_replicates'))
 
         manager = SimulationManager()
-        simulations = manager.list_simulations(include_replicates=include_replicates)[:limit]
+        simulations = manager.list_simulations(include_replicates=include_replicates)
+        # Most recently touched first: the later of the record's own update time and
+        # the run's last activity (a run only updates run_state.json while it works).
+        activity = {s.simulation_id: _last_activity(s) for s in simulations}
+        simulations.sort(key=lambda s: activity[s.simulation_id], reverse=True)
+        simulations = simulations[:limit]
         
         # 增强模拟数据，只从 Simulation 文件读取
         enriched_simulations = []
         for sim in simulations:
             sim_dict = sim.to_dict()
+            sim_dict["last_activity"] = activity[sim.simulation_id]
             
             # 获取模拟配置信息（从 simulation_config.json 读取 simulation_requirement）
             config = manager.get_simulation_config(sim.simulation_id)

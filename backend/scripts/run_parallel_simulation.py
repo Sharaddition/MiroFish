@@ -956,11 +956,65 @@ def _get_comment_info(
     return None
 
 
+_fallback_notices = {"count": 0}
+_fallback_pacers: Dict[float, "sim_runtime.Pacer"] = {}
+
+
+def _fallback_pacer() -> Optional["sim_runtime.Pacer"]:
+    """One pacer for the backup model of both platforms (LLM_FALLBACK_MIN_INTERVAL seconds, default off)."""
+    try:
+        interval = float(os.environ.get("LLM_FALLBACK_MIN_INTERVAL") or 0)
+    except ValueError:
+        interval = 0.0
+    if interval <= 0:
+        return None
+    return _fallback_pacers.setdefault(interval, sim_runtime.Pacer(interval))
+
+
 def create_model(
     config: Dict[str, Any],
     use_boost: bool = False,
     run_settings: Optional[Dict[str, Any]] = None,
     seed: Optional[int] = None,
+):
+    """The platform's model, backed up by a second one.
+
+    A call the platform's model cannot serve (quota, request too large, outage, rejected key) is retried
+    once on the backup: the dedicated LLM_FALLBACK_* model when it is set (needs KEY and MODEL), else,
+    when a boost model is configured, the other of main/boost. LLM_FALLBACK=false turns this off.
+    """
+    primary = _make_model(config, use_boost, run_settings, seed)
+    enabled = os.environ.get("LLM_FALLBACK", "true").strip().lower() not in ("false", "0", "no", "off")
+    has_dedicated = bool(os.environ.get("LLM_FALLBACK_API_KEY") and os.environ.get("LLM_FALLBACK_MODEL_NAME"))
+    has_boost = bool(os.environ.get("LLM_BOOST_API_KEY"))
+    if not enabled or not (has_dedicated or has_boost):
+        return primary
+
+    if has_dedicated:
+        other = _make_model(config, use_boost, run_settings, seed, use_fallback=True)
+        backup_label = "专用备用"
+    else:
+        other = _make_model(config, not use_boost, run_settings, seed)
+        backup_label = "通用" if use_boost else "加速"
+
+    def note(error: BaseException) -> None:
+        _fallback_notices["count"] += 1
+        if _fallback_notices["count"] in (1, 10) or _fallback_notices["count"] % 50 == 0:
+            kind, message = sim_runtime.classify_error(error)
+            print(
+                f"[备用模型] 第 {_fallback_notices['count']} 次改用{backup_label}LLM重试 "
+                f"({kind}: {message[:100]})"
+            )
+
+    return sim_runtime.install_model_fallback(primary, other, note, pacer=_fallback_pacer())
+
+
+def _make_model(
+    config: Dict[str, Any],
+    use_boost: bool = False,
+    run_settings: Optional[Dict[str, Any]] = None,
+    seed: Optional[int] = None,
+    use_fallback: bool = False,
 ):
     """
     创建LLM模型
@@ -985,7 +1039,13 @@ def create_model(
     has_boost_config = bool(boost_api_key)
 
     # 根据参数和配置情况选择使用哪个 LLM
-    if use_boost and has_boost_config:
+    if use_fallback:
+        # 专用备用模型 (LLM_FALLBACK_*)；base url 缺省时沿用通用配置
+        llm_api_key = os.environ.get("LLM_FALLBACK_API_KEY", "")
+        llm_base_url = os.environ.get("LLM_FALLBACK_BASE_URL") or os.environ.get("LLM_BASE_URL", "")
+        llm_model = os.environ.get("LLM_FALLBACK_MODEL_NAME", "")
+        config_label = "[备用LLM]"
+    elif use_boost and has_boost_config:
         # 使用加速配置
         llm_api_key = boost_api_key
         llm_base_url = boost_base_url
