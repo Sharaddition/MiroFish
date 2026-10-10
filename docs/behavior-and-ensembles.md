@@ -76,6 +76,10 @@ slow model or provider one of those requests can take minutes.
   types; if the model writes something else, the post goes to an agent whose type or name is close enough
   (`Official` → `GovernmentOfficial`, a name such as `Ministry of Home Affairs`), and otherwise to the most
   influential agents one after another, so that not every post comes from the same account.
+- A separate, stronger or faster model can do this work: set `LLM_PREP_API_KEY` and `LLM_PREP_MODEL_NAME` (and
+  `LLM_PREP_BASE_URL` if it is on another provider). It writes the agent personas and the simulation config, **and the
+  final report** (including the report tools' sub-question step); the simulation run itself keeps using `LLM_*`. Without
+  `LLM_PREP_*` everything uses the main model, as before.
 
 ---
 

@@ -468,3 +468,29 @@ def test_without_a_preparation_model_the_main_one_is_used(monkeypatch):
     monkeypatch.setattr(Config, "LLM_PREP_API_KEY", None)
     monkeypatch.setattr(Config, "LLM_PREP_MODEL_NAME", "fast-model")   # key missing: not usable
     assert Config.prep_llm()["model_name"] == Config.LLM_MODEL_NAME
+
+
+def test_the_report_and_its_tools_use_the_preparation_model(monkeypatch):
+    from app.config import Config
+    from app.services.report_agent import ReportAgent
+    from app.services.zep_tools import ZepToolsService
+    from app.utils.llm_client import LLMClient
+
+    monkeypatch.setattr(Config, "LLM_PREP_API_KEY", "prep-key")
+    monkeypatch.setattr(Config, "LLM_PREP_MODEL_NAME", "strong-model")
+    monkeypatch.setattr(Config, "LLM_PREP_BASE_URL", "https://prep.example/v1")
+
+    assert LLMClient.for_preparation().model == "strong-model"
+    assert LLMClient.for_preparation().base_url == "https://prep.example/v1"
+    agent = ReportAgent("graph_1", "sim_x", "requirement", zep_tools=object())
+    assert agent.llm.model == "strong-model" and agent.llm.api_key == "prep-key"
+    assert ZepToolsService.llm.fget(SimpleNamespace(_llm_client=None)).model == "strong-model"
+
+
+def test_without_a_preparation_model_the_report_uses_the_main_one(monkeypatch):
+    from app.config import Config
+    from app.services.report_agent import ReportAgent
+
+    monkeypatch.setattr(Config, "LLM_PREP_API_KEY", None)
+    monkeypatch.setattr(Config, "LLM_PREP_MODEL_NAME", None)
+    assert ReportAgent("graph_1", "sim_x", "requirement", zep_tools=object()).llm.model == Config.LLM_MODEL_NAME

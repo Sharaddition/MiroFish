@@ -971,7 +971,8 @@ class ReportAgent:
         self._ensemble_markdown = ""
         self._hypothesis = ""
 
-        self.llm = llm_client or LLMClient()
+        # The report uses the same model as the simulation preparation (LLM_PREP_*, else the main one).
+        self.llm = llm_client or LLMClient.for_preparation()
         self.zep_tools = zep_tools or ZepToolsService()
 
         if ensemble_id:

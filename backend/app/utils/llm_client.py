@@ -119,6 +119,16 @@ class LLMClient:
             base_url=self.base_url
         )
 
+    @classmethod
+    def for_preparation(cls) -> "LLMClient":
+        """The client for the stronger model that prepares a simulation and writes its report.
+
+        It is ``LLM_PREP_*`` when that is configured (key and model name), else the main ``LLM_*`` model, so
+        installations without a separate model are unaffected.
+        """
+        prep = Config.prep_llm()
+        return cls(api_key=prep["api_key"], base_url=prep["base_url"], model=prep["model_name"])
+
     def _create_completion(
         self,
         *,
