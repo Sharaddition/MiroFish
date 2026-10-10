@@ -223,48 +223,25 @@ def model_client_options(environ: Mapping[str, str]) -> Dict[str, Any]:
             retries = -1
         if retries >= 0:
             options["max_retries"] = retries
-    raw_ua = environ.get("LLM_USER_AGENT")
-    if raw_ua:
-        ua = raw_ua.strip()
-        if ua and "/" not in ua:
-            ua = f"{ua}/1.0.0"
-        if ua:
-            options["default_headers"] = {"User-Agent": ua}
     return options
 
 
 def apply_model_client_options(model: Any, options: Mapping[str, Any]) -> Any:
-    """Make ``max_retries`` and custom headers (e.g. User-Agent) take effect on a camel OpenAI model.
+    """Make ``max_retries`` take effect on a camel OpenAI model.
 
     camel's OpenAIModel accepts ``max_retries`` but its base class resets it to 3 before the clients are
     built, so the factory argument alone does nothing. The SDK clients read ``max_retries`` on every
     request, so setting it on them works. (``timeout`` is honoured by the factory as is.)
     """
-    if "max_retries" in options:
-        retries = int(options["max_retries"])
-        for name in ("_client", "_async_client"):
-            client = getattr(model, name, None)
-            if client is not None and hasattr(client, "max_retries"):
-                client.max_retries = retries
-        if hasattr(model, "_max_retries"):
-            model._max_retries = retries
-
-    ua = (
-        options.get("default_headers", {}).get("User-Agent")
-        or os.environ.get("LLM_USER_AGENT")
-    )
-    if ua:
-        ua = str(ua).strip()
-        if "/" not in ua:
-            ua = f"{ua}/1.0.0"
-        for name in ("_client", "_async_client"):
-            client = getattr(model, name, None)
-            if client is not None:
-                if hasattr(client, "_custom_headers"):
-                    client._custom_headers["User-Agent"] = ua
-                if hasattr(client, "default_headers"):
-                    client.default_headers["User-Agent"] = ua
-
+    if "max_retries" not in options:
+        return model
+    retries = int(options["max_retries"])
+    for name in ("_client", "_async_client"):
+        client = getattr(model, name, None)
+        if client is not None and hasattr(client, "max_retries"):
+            client.max_retries = retries
+    if hasattr(model, "_max_retries"):
+        model._max_retries = retries
     return model
 
 

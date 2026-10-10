@@ -653,7 +653,6 @@ class SimulationConfigGenerator:
             base_url=self.base_url,
             timeout=httpx.Timeout(self.request_timeout, connect=min(15.0, self.request_timeout)),
             max_retries=0,
-            default_headers=Config.get_llm_default_headers(),
         )
     
     def generate_config(
