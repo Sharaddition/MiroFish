@@ -67,6 +67,14 @@ BASE_LLM_SEMAPHORE = 30  # default, kept for reference; see _base_llm_semaphore(
 PLATFORMS_SUPPORTED = ("parallel",)
 
 TERMINAL_STATUSES = ("completed", "partial", "failed", "stopped")
+#: An ensemble in one of these states can be resumed (its unfinished runs continue, finished ones are kept).
+RESUMABLE_STATUSES = ("stopped", "failed", "partial")
+#: A replicate that failed with this error was cut off, not broken, and may be resumed.
+INTERRUPTED_ERROR = "interrupted"
+#: ... as did one whose process left no run state at all (it never got going; resume_info decides what to do).
+NO_RUN_STATE_ERROR = "no run state was recorded"
+#: ``SimulationRunner.resume_info`` reasons that mean the run produced nothing worth keeping: start it over.
+_NOTHING_TO_KEEP = ("has not been run yet", "still setting up", "database is missing")
 REPLICATE_TERMINAL = ("completed", "failed", "stopped")
 
 
@@ -489,7 +497,7 @@ class EnsembleManager:
         """The terminal outcome of a running replicate, or None while it still runs."""
         state = SimulationRunner.get_run_state(replicate["simulation_id"])
         if state is None:
-            return {"status": "failed", "error": "no run state was recorded"}
+            return {"status": "failed", "error": NO_RUN_STATE_ERROR}
         if state.runner_status == RunnerStatus.COMPLETED:
             return {"status": "completed", "error": None}
         if state.runner_status == RunnerStatus.FAILED:
@@ -532,8 +540,11 @@ class EnsembleManager:
                                 enable_graph_memory_update=False,
                                 seed=replicate["seed"],
                                 wait_for_commands=False,
+                                resume=bool(replicate.get("resume")),
                             )
-                            replicate.update(status="running", started_at=_now())
+                            if replicate.pop("resume", None):
+                                replicate["resumed"] = True
+                            replicate.update(status="running", started_at=replicate.get("started_at") or _now())
                             active += 1
                         except Exception as error:
                             logger.error(f"Replicate {replicate['simulation_id']} failed to start: {error}")
@@ -596,6 +607,88 @@ class EnsembleManager:
                 logger.error(f"Ensemble {ensemble_id} aggregation failed: {error}")
                 ensemble.update(status="failed", error=f"aggregation failed: {error}")
             cls._save(ensemble)
+
+    # --- resume -------------------------------------------------------------------
+
+    @classmethod
+    def _resume_plan(cls, ensemble: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """What resuming would do to each replicate that was cut off.
+
+        ``[{"simulation_id", "action": "resume" | "restart" | "skip", "round", "reason"}]``. A replicate that
+        was stopped, or failed as ``interrupted``, continues after its last finished round when it can;
+        one that never produced anything starts over; anything else is left alone.
+        """
+        plan = []
+        for replicate in ensemble["replicates"]:
+            cut_off = replicate["status"] == "stopped" or (
+                replicate["status"] == "failed" and replicate.get("error") in (INTERRUPTED_ERROR, NO_RUN_STATE_ERROR)
+            )
+            if not cut_off:
+                continue
+            simulation_id = replicate["simulation_id"]
+            info = SimulationRunner.resume_info(simulation_id)
+            if info["resumable"]:
+                plan.append({"simulation_id": simulation_id, "action": "resume", "round": info["round"],
+                             "exact": info["exact"], "reason": None})
+            elif any(text in (info["reason"] or "") for text in _NOTHING_TO_KEEP):
+                plan.append({"simulation_id": simulation_id, "action": "restart", "round": 0,
+                             "exact": None, "reason": info["reason"]})
+            else:
+                plan.append({"simulation_id": simulation_id, "action": "skip", "round": None,
+                             "exact": None, "reason": info["reason"]})
+        return plan
+
+    @classmethod
+    def resume_info(cls, ensemble_id: str) -> Dict[str, Any]:
+        """Whether the ensemble can be resumed and what would happen to each of its runs."""
+        ensemble = cls.reconcile(ensemble_id)
+        if ensemble["status"] not in RESUMABLE_STATUSES:
+            return {"resumable": False, "reason": f"an ensemble that is '{ensemble['status']}' cannot be resumed",
+                    "replicates": []}
+        plan = cls._resume_plan(ensemble)
+        usable = [item for item in plan if item["action"] != "skip"]
+        return {
+            "resumable": bool(usable),
+            "reason": None if usable else "none of its runs can continue",
+            "replicates": plan,
+        }
+
+    @classmethod
+    def resume(cls, ensemble_id: str) -> Dict[str, Any]:
+        """Continue a stopped or interrupted ensemble: unfinished runs resume, finished ones are kept."""
+        with cls._lock(ensemble_id):
+            ensemble = cls.reconcile(ensemble_id)
+            if ensemble["status"] not in RESUMABLE_STATUSES:
+                raise EnsembleConflict(f"An ensemble that is '{ensemble['status']}' cannot be resumed")
+            plan = cls._resume_plan(ensemble)
+            chosen = {item["simulation_id"]: item for item in plan if item["action"] != "skip"}
+            if not chosen:
+                raise EnsembleConflict("None of this ensemble's runs can be resumed; create a new ensemble")
+
+            for replicate in ensemble["replicates"]:
+                item = chosen.get(replicate["simulation_id"])
+                if item is None:
+                    continue
+                if item["action"] == "restart":
+                    result = SimulationRunner.cleanup_simulation_logs(replicate["simulation_id"])
+                    if not result.get("success"):
+                        raise EnsembleConflict(f"Cannot reset {replicate['simulation_id']}: {result.get('errors')}")
+                    replicate.pop("started_at", None)
+                replicate.update(status="pending", error=None, completed_at=None)
+                replicate["resume"] = item["action"] == "resume"
+            ensemble.update(
+                status="running", error=None, completed_at=None, resumed_at=_now(),
+                resume_count=int(ensemble.get("resume_count") or 0) + 1,
+            )
+            cls._stop_requested.discard(ensemble_id)
+            cls._save(ensemble)
+
+            thread = threading.Thread(
+                target=cls._run, args=(ensemble_id,), name=f"ensemble-{ensemble_id}", daemon=True
+            )
+            cls._threads[ensemble_id] = thread
+            thread.start()
+            return cls._with_progress(ensemble)
 
     # --- stop ---------------------------------------------------------------------
 

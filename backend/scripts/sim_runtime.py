@@ -159,6 +159,50 @@ def should_fall_back(error: BaseException) -> bool:
     return status == 413  # request too large for this model's per-minute token limit
 
 
+def model_client_options(environ: Mapping[str, str]) -> Dict[str, Any]:
+    """``timeout`` / ``max_retries`` for the model client, from LLM_MODEL_TIMEOUT / LLM_MODEL_MAX_RETRIES.
+
+    camel's own defaults (180 s, 3 silent retries) let one stuck request hold a round for ~12 minutes
+    before any error, or the backup model, shows up. A value that is unset or not a valid number is
+    left out, so the library default applies.
+    """
+    options: Dict[str, Any] = {}
+    try:
+        timeout = float(environ.get("LLM_MODEL_TIMEOUT") or 0)
+    except ValueError:
+        timeout = 0.0
+    if timeout > 0:
+        options["timeout"] = timeout
+    raw_retries = environ.get("LLM_MODEL_MAX_RETRIES")
+    if raw_retries not in (None, ""):
+        try:
+            retries = int(raw_retries)
+        except ValueError:
+            retries = -1
+        if retries >= 0:
+            options["max_retries"] = retries
+    return options
+
+
+def apply_model_client_options(model: Any, options: Mapping[str, Any]) -> Any:
+    """Make ``max_retries`` take effect on a camel OpenAI model.
+
+    camel's OpenAIModel accepts ``max_retries`` but its base class resets it to 3 before the clients are
+    built, so the factory argument alone does nothing. The SDK clients read ``max_retries`` on every
+    request, so setting it on them works. (``timeout`` is honoured by the factory as is.)
+    """
+    if "max_retries" not in options:
+        return model
+    retries = int(options["max_retries"])
+    for name in ("_client", "_async_client"):
+        client = getattr(model, name, None)
+        if client is not None and hasattr(client, "max_retries"):
+            client.max_retries = retries
+    if hasattr(model, "_max_retries"):
+        model._max_retries = retries
+    return model
+
+
 class Pacer:
     """Spaces calls at least ``interval`` seconds apart, however many callers wait.
 

@@ -119,6 +119,16 @@ export const startEnsemble = (ensembleId) => {
   return service.post(`/api/simulation/ensemble/${ensembleId}/start`)
 }
 
+/** 继续已停止/中断的集合运行：未完成的运行从各自最后完成的一轮之后继续，已完成的保留 */
+export const resumeEnsemble = (ensembleId) => {
+  return service.post(`/api/simulation/ensemble/${ensembleId}/resume`)
+}
+
+/** 继续集合运行会对每个运行做什么：{ resumable, replicates: [{ simulation_id, action: resume|restart|skip, round }] } */
+export const getEnsembleResumeInfo = (ensembleId) => {
+  return service.get(`/api/simulation/ensemble/${ensembleId}/resume-info`)
+}
+
 /** 停止集合运行：停止正在运行的副本，其余标记为已停止 */
 export const stopEnsemble = (ensembleId) => {
   return service.post(`/api/simulation/ensemble/${ensembleId}/stop`)
@@ -242,6 +252,22 @@ export const interviewAgents = (data) => {
  */
 export const getSimulationHistory = (limit = 20) => {
   return service.get('/api/simulation/history', { params: { limit } })
+}
+
+/**
+ * 已停止/中断的运行能否从最后完成的一轮之后继续：{ resumable, reason, round, total_rounds, exact }
+ * @param {string} simulationId
+ */
+export const getResumeInfo = (simulationId) => {
+  return service.get(`/api/simulation/${simulationId}/resume-info`)
+}
+
+/**
+ * 继续已停止/中断的运行（保留数据库与日志；Agent 的对话记忆无法恢复）
+ * @param {Object} data - { simulation_id, enable_graph_memory_update? }
+ */
+export const resumeSimulation = (data) => {
+  return service.post('/api/simulation/resume', data)
 }
 
 /**

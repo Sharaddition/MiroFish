@@ -119,6 +119,24 @@ def stop_ensemble(ensemble_id: str):
         return _handle(error)
 
 
+@ensemble_bp.route('/ensemble/<ensemble_id>/resume', methods=['POST'])
+def resume_ensemble(ensemble_id: str):
+    """Continue a stopped or interrupted ensemble from where its runs left off."""
+    try:
+        return _ok(EnsembleManager.resume(ensemble_id))
+    except Exception as error:
+        return _handle(error)
+
+
+@ensemble_bp.route('/ensemble/<ensemble_id>/resume-info', methods=['GET'])
+def get_ensemble_resume_info(ensemble_id: str):
+    """What resuming would do to each run of the ensemble."""
+    try:
+        return _ok(EnsembleManager.resume_info(ensemble_id))
+    except Exception as error:
+        return _handle(error)
+
+
 @ensemble_bp.route('/ensemble/list', methods=['GET'])
 def list_ensembles():
     """List ensembles, newest first. Query: ``simulation_id`` filters by base simulation."""

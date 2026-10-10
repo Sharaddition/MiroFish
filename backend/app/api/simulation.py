@@ -2023,6 +2023,94 @@ def start_simulation():
         }), 500
 
 
+@simulation_bp.route('/<simulation_id>/resume-info', methods=['GET'])
+def get_resume_info(simulation_id: str):
+    """
+    Can this stopped or interrupted run continue after its last finished round?
+
+    Returns {"resumable", "reason", "round", "rounds": {platform: n}, "total_rounds", "exact"}.
+    "exact" means the platform databases can be put back exactly as they were when that round ended.
+    Agent chat memory is never restored, so a resumed run is not identical to an uninterrupted one.
+    """
+    try:
+        if not SimulationManager().get_simulation(simulation_id):
+            return jsonify({"success": False, "error": t('api.simulationNotFound', id=simulation_id)}), 404
+        return jsonify({"success": True, "data": SimulationRunner.resume_info(simulation_id)})
+    except Exception as e:
+        logger.error(f"获取继续运行信息失败: {simulation_id}, error={e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@simulation_bp.route('/resume', methods=['POST'])
+def resume_simulation():
+    """
+    Continue a stopped or interrupted run from the end of its last finished round.
+
+    The platform databases and action logs are kept (the log is cut back to the end of that round, so a
+    round that had started but not finished is redone). The scheduling of the finished rounds is replayed
+    without model calls. Use /start with force=true to start over instead.
+
+    Request (JSON):
+        {
+            "simulation_id": "sim_xxxx",              // required
+            "enable_graph_memory_update": false       // optional: write the new activity to the Zep graph
+        }
+    """
+    try:
+        data = request.get_json() or {}
+        simulation_id = data.get('simulation_id')
+        if not simulation_id:
+            return jsonify({"success": False, "error": t('api.requireSimulationId')}), 400
+        enable_graph_memory_update = data.get('enable_graph_memory_update', False)
+        if not isinstance(enable_graph_memory_update, bool):
+            return jsonify({"success": False, "error": "enable_graph_memory_update must be a JSON boolean"}), 400
+
+        manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+        if not state:
+            return jsonify({"success": False, "error": t('api.simulationNotFound', id=simulation_id)}), 404
+
+        info = SimulationRunner.resume_info(simulation_id)
+        if not info["resumable"]:
+            return jsonify({
+                "success": False,
+                "error": t('api.resumeNotPossible', reason=info["reason"]),
+                "data": info,
+            }), 409
+
+        graph_id = None
+        if enable_graph_memory_update:
+            project = ProjectManager.get_project(state.project_id)
+            graph_id = project.graph_id if project else None
+            if not graph_id:
+                return jsonify({"success": False, "error": t('api.graphIdRequiredForMemory')}), 400
+
+        graph_guard = graph_lifecycle_lock(graph_id) if graph_id else nullcontext()
+        with graph_guard:
+            run_state = SimulationRunner.start_simulation(
+                simulation_id=simulation_id,
+                platform="parallel",
+                enable_graph_memory_update=enable_graph_memory_update,
+                graph_id=graph_id,
+                resume=True,
+            )
+
+        response_data = run_state.to_dict()
+        response_data['graph_memory_update_enabled'] = enable_graph_memory_update
+        response_data['resume'] = info
+        return jsonify({"success": True, "data": response_data})
+
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 409
+    except Exception as e:
+        logger.error(f"继续模拟失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
 @simulation_bp.route('/stop', methods=['POST'])
 def stop_simulation():
     """

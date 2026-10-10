@@ -142,6 +142,24 @@
       </p>
       <p v-if="ensemble.status === 'stopped'" class="notice">{{ $t('ensemble.stoppedNote') }}</p>
 
+      <!-- Runs that were cut off can continue; finished runs are kept -->
+      <section v-if="resumeInfo && resumeInfo.resumable" class="block resume-block">
+        <h3 class="block-subtitle">{{ $t('resume.ensembleTitle') }}</h3>
+        <p class="lead">{{ $t('resume.ensembleOffer', { count: resumingCount }) }}</p>
+        <ul class="resume-list">
+          <li v-for="item in resumeInfo.replicates.filter(r => r.action !== 'skip')" :key="item.simulation_id" class="mono">
+            {{ item.action === 'resume'
+              ? $t('resume.ensembleRunLine', { index: runIndex(item.simulation_id), round: item.round })
+              : $t('resume.ensembleRunRestart', { index: runIndex(item.simulation_id) }) }}
+          </li>
+        </ul>
+        <p class="hint">{{ $t('resume.memoryNote') }}</p>
+        <p v-if="resumeInexact" class="hint">{{ $t('resume.inexactNote') }}</p>
+        <button type="button" class="btn primary" :disabled="busy !== ''" @click="resume">
+          {{ busy === 'resume' ? $t('resume.resuming') : $t('resume.ensembleButton') }}
+        </button>
+      </section>
+
       <section v-if="summary" class="block">
         <EnsembleSummaryTable :summary="summary" />
       </section>
@@ -175,7 +193,9 @@ import {
   listEnsembles,
   putEnsembleOutcomeQuestions,
   startEnsemble,
-  stopEnsemble
+  stopEnsemble,
+  resumeEnsemble,
+  getEnsembleResumeInfo
 } from '../api/simulation'
 import { generateReport } from '../api/report'
 import EnsembleSummaryTable from './EnsembleSummaryTable.vue'
@@ -229,6 +249,24 @@ const loadingText = computed(() => (
 const cost = computed(() => ensemble.value?.cost_estimate || null)
 const isActive = computed(() => ACTIVE_STATUSES.includes(ensemble.value?.status))
 // The run that is working right now (the banner and the status line describe this one)
+// What resuming would do to each cut-off run (only fetched for a stopped, failed or partial ensemble)
+const resumeInfo = ref(null)
+const resumingCount = computed(() => (resumeInfo.value?.replicates || []).filter(r => r.action !== 'skip').length)
+const resumeInexact = computed(() => (resumeInfo.value?.replicates || []).some(r => r.action === 'resume' && r.exact === false))
+const runIndex = (simulationId) => {
+  const run = (ensemble.value?.replicates || []).find(item => item.simulation_id === simulationId)
+  return t('ensemble.runLabel', { index: run?.index ?? '?' })
+}
+const loadResumeInfo = async () => {
+  resumeInfo.value = null
+  if (!ensemble.value || !['stopped', 'failed', 'partial'].includes(ensemble.value.status)) return
+  try {
+    const res = await getEnsembleResumeInfo(ensemble.value.ensemble_id)
+    resumeInfo.value = res.data
+  } catch (err) {
+    resumeInfo.value = null
+  }
+}
 const workingRun = computed(() => (ensemble.value?.replicates || []).find((run) => run.status === 'running'))
 const formatCount = (value) => (Number.isFinite(value) ? Math.round(value).toLocaleString() : '–')
 
@@ -410,6 +448,7 @@ const settle = async () => {
       actionError.value = t('ensemble.loadFailed', { error: reason(err) })
     }
   }
+  await loadResumeInfo()
   emit('update-status', status === 'failed' ? 'error' : 'completed')
 }
 
@@ -481,6 +520,28 @@ const stop = async () => {
     await poll()
   } catch (err) {
     actionError.value = t('ensemble.stopFailed', { error: reason(err) })
+    emit('add-log', actionError.value)
+  } finally {
+    busy.value = ''
+  }
+}
+
+const resume = async () => {
+  if (!ensemble.value || busy.value) return
+  busy.value = 'resume'
+  actionError.value = ''
+  const id = ensemble.value.ensemble_id
+  try {
+    const resumed = await resumeEnsemble(id)
+    adopt(resumed.data, { keepQuestions: true })
+    resumeInfo.value = null
+    summary.value = null
+    log('resumed', { id, status: t(`ensemble.ensembleStatus.${resumed.data.status}`) })
+    stage.value = 'running'
+    emit('update-status', 'processing')
+    startPolling()
+  } catch (err) {
+    actionError.value = t('resume.failed', { error: reason(err) })
     emit('add-log', actionError.value)
   } finally {
     busy.value = ''

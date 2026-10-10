@@ -5,6 +5,7 @@ OASIS模拟运行器
 
 import os
 import sys
+import importlib.util
 import json
 import time
 import asyncio
@@ -174,6 +175,13 @@ class SimulationRunState:
     # Progress of the end-of-run poll (ensemble replicates), from the poll_status events
     poll: Optional[Dict[str, Any]] = None
 
+    # Set when the run was continued from the end of an earlier round ("Resume"): the round it continued
+    # after (the smaller of the two platforms'), how many times that happened, and whether the platform
+    # databases were restored from an exact end-of-round checkpoint.
+    resumed_from_round: Optional[int] = None
+    resume_count: int = 0
+    resume_exact: Optional[bool] = None
+
     # --- activity and failures --------------------------------------------------------------
 
     def _recent_rounds(self, platform: str) -> List[List[int]]:
@@ -304,6 +312,9 @@ class SimulationRunState:
             "failures": self.failures,
             "poll": self.poll,
             "health": self.health(),
+            "resumed_from_round": self.resumed_from_round,
+            "resume_count": self.resume_count,
+            "resume_exact": self.resume_exact,
         }
 
     def to_detail_dict(self) -> Dict[str, Any]:
@@ -350,6 +361,8 @@ class SimulationRunner:
     _finalization_locks: Dict[str, threading.Lock] = {}
     _finalization_locks_guard = threading.Lock()
     _manual_stop_requests: set[str] = set()
+    # simulation_id -> {platform: byte position in actions.jsonl} the monitor starts from after a resume
+    _resume_positions: Dict[str, Dict[str, int]] = {}
 
     @classmethod
     def _finalization_lock(cls, simulation_id: str) -> threading.Lock:
@@ -448,6 +461,9 @@ class SimulationRunner:
                 activity=data.get("activity") or {},
                 failures=data.get("failures") or {},
                 poll=data.get("poll"),
+                resumed_from_round=data.get("resumed_from_round"),
+                resume_count=data.get("resume_count") or 0,
+                resume_exact=data.get("resume_exact"),
             )
 
             # 加载最近动作
@@ -510,6 +526,101 @@ class SimulationRunner:
         config["run"] = run
         write_json_atomic(config_path, config)
 
+    # --- resume ---------------------------------------------------------------------------------
+
+    RESUME_PLATFORMS = ("twitter", "reddit")
+
+    @classmethod
+    def _sim_resume(cls):
+        """The ``sim_resume`` helper module that lives next to the run scripts (same one the script uses)."""
+        module = sys.modules.get("sim_resume")
+        if module is None:
+            spec = importlib.util.spec_from_file_location("sim_resume", os.path.join(cls.SCRIPTS_DIR, "sim_resume.py"))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["sim_resume"] = module
+            spec.loader.exec_module(module)
+        return module
+
+    @classmethod
+    def resume_info(cls, simulation_id: str) -> Dict[str, Any]:
+        """Whether a stopped or interrupted run can continue after its last finished round, and from where.
+
+        ``{"resumable", "reason", "round", "rounds": {platform: n}, "total_rounds", "exact"}``. ``round`` is
+        the last round every platform finished; ``exact`` is True when each platform database can be put back
+        exactly as it was at the end of that round (otherwise the unfinished round's earlier actions stay in
+        it). Never raises and never changes anything.
+        """
+        info: Dict[str, Any] = {
+            "resumable": False, "reason": None, "round": None, "rounds": {}, "total_rounds": None, "exact": None,
+        }
+        state = cls.get_run_state(simulation_id)
+        if state is None or state.runner_status == RunnerStatus.IDLE:
+            info["reason"] = "this simulation has not been run yet"
+            return info
+        info["total_rounds"] = state.total_rounds
+        if state.runner_status == RunnerStatus.COMPLETED:
+            info["reason"] = "the run is already complete"
+            return info
+        if cls.has_live_process(simulation_id):
+            info["reason"] = "the run is still running"
+            return info
+        if ZepGraphMemoryManager.get_updater(simulation_id) is not None:
+            info["reason"] = "the run is still finishing"
+            return info
+        if state.seed is None:
+            info["reason"] = "the run's seed was not recorded, so its scheduling cannot be replayed"
+            return info
+
+        helper = cls._sim_resume()
+        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        plans = {platform: helper.plan_resume(sim_dir, platform) for platform in cls.RESUME_PLATFORMS}
+        blocked = [plan for plan in plans.values() if not plan.resumable]
+        if blocked:
+            info["reason"] = "; ".join(f"{plan.platform}: {plan.reason}" for plan in blocked)
+            return info
+
+        info["rounds"] = {platform: plan.round for platform, plan in plans.items()}
+        info["round"] = min(plan.round for plan in plans.values())
+        info["exact"] = all(plan.exact for plan in plans.values())
+        info["resumable"] = True
+        return info
+
+    @classmethod
+    def _prepare_resume(cls, simulation_id: str, state: SimulationRunState) -> Dict[str, int]:
+        """Put logs and databases back at the end of the last finished round and load the log into ``state``.
+
+        The caller holds the finalization lock and has verified the run is not active. Returns the byte
+        position of each action log so the monitor continues after what was already loaded.
+        """
+        helper = cls._sim_resume()
+        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        plans = {platform: helper.plan_resume(sim_dir, platform) for platform in cls.RESUME_PLATFORMS}
+        for platform, plan in plans.items():
+            if not plan.resumable:
+                raise ValueError(f"cannot resume {platform}: {plan.reason}")
+
+        positions: Dict[str, int] = {}
+        for platform, plan in plans.items():
+            log_path = os.path.join(sim_dir, platform, "actions.jsonl")
+            helper.truncate_log(log_path, plan.offset)
+            if plan.exact:
+                helper.restore_checkpoint(os.path.join(sim_dir, f"{platform}_simulation.db"))
+
+        # Rebuild the counters from the kept log. Nothing of it may reach the Zep graph again.
+        cls._graph_memory_enabled[simulation_id] = False
+        for platform in plans:
+            positions[platform] = cls._read_action_log(
+                os.path.join(sim_dir, platform, "actions.jsonl"), 0, state, platform
+            )
+
+        state.resumed_from_round = min(plan.round for plan in plans.values())
+        state.resume_exact = all(plan.exact for plan in plans.values())
+        logger.info(
+            f"继续模拟: {simulation_id}, 各平台继续位置 { {p: plan.round for p, plan in plans.items()} }, "
+            f"exact={state.resume_exact}"
+        )
+        return positions
+
     @classmethod
     def start_simulation(
         cls,
@@ -520,6 +631,7 @@ class SimulationRunner:
         graph_id: str = None,  # Zep图谱ID（启用图谱更新时必需）
         seed: Optional[int] = None,  # 随机种子（缺省时随机生成并持久化）
         wait_for_commands: bool = True,  # False 时传 --no-wait：跑完立即退出，释放资源
+        resume: bool = False,  # True：从上次完成的一轮之后继续（保留数据库与日志），而不是重新开始
     ) -> SimulationRunState:
         """
         启动模拟
@@ -535,10 +647,23 @@ class SimulationRunner:
                 run_state.json 与配置文件的 run 块。
             wait_for_commands: 模拟结束后是否保持环境运行以接受 Interview 命令。
                 False 时进程跑完即退出（集成测试/集合运行使用）。
+            resume: 继续一个已停止/中断的运行：保留平台数据库与动作日志，日志截断到最后完成
+                的一轮，从下一轮继续（沿用原来的种子与轮数）。Agent 的对话记忆无法恢复，
+                所以结果与不中断的运行不完全相同。见 resume_info()。
 
         Returns:
             SimulationRunState
         """
+        previous = None
+        if resume:
+            info = cls.resume_info(simulation_id)
+            if not info["resumable"]:
+                raise ValueError(f"无法继续: {info['reason']}")
+            previous = cls.get_run_state(simulation_id)
+            # The scheduling replay is only valid with the run's own seed and round limit.
+            seed = previous.seed
+            if previous.total_rounds and previous.total_rounds > 0:
+                max_rounds = previous.total_rounds
         if seed is None:
             seed = secrets.randbelow(2 ** 31)
         else:
@@ -571,9 +696,11 @@ class SimulationRunner:
             runner_status=RunnerStatus.STARTING,
             total_rounds=total_rounds,
             total_simulation_hours=total_hours,
-            started_at=datetime.now().isoformat(),
+            started_at=(previous.started_at if previous and previous.started_at else datetime.now().isoformat()),
             seed=seed,
         )
+        if previous is not None:
+            state.resume_count = (previous.resume_count or 0) + 1
 
         # Atomically claim this simulation ID. The expensive updater/process
         # startup happens after releasing the lock, while the persisted
@@ -587,12 +714,19 @@ class SimulationRunner:
                 RunnerStatus.STOPPING,
             }
             if (
-                (existing and existing.runner_status in active_statuses)
+                (
+                    existing and existing.runner_status in active_statuses
+                    # A resumed run's old state may still say RUNNING when the process is long gone.
+                    and (not resume or cls.has_live_process(simulation_id))
+                )
                 or ZepGraphMemoryManager.get_updater(simulation_id) is not None
                 # A COMPLETED run may still own a live interview environment.
                 or cls.has_live_process(simulation_id)
             ):
                 raise ValueError(f"模拟已在运行或结束处理中: {simulation_id}")
+            resume_positions = cls._prepare_resume(simulation_id, state) if resume else None
+            if resume_positions is not None:
+                cls._resume_positions[simulation_id] = resume_positions
             cls._save_run_state(state)
             # A previous run's "alive" marker must not make this run look like
             # it is already parked in command-wait mode.
@@ -697,10 +831,19 @@ class SimulationRunner:
             # 不等待命令：脚本跑完就退出（监控线程据此发布 COMPLETED）
             if not wait_for_commands:
                 cmd.append("--no-wait")
+
+            if resume:
+                cmd.append("--resume")
             
             # 创建主日志文件，避免 stdout/stderr 管道缓冲区满导致进程阻塞
             main_log_path = os.path.join(sim_dir, "simulation.log")
-            main_log_file = open(main_log_path, 'w', encoding='utf-8')
+            main_log_file = open(main_log_path, 'a' if resume else 'w', encoding='utf-8')
+            if resume:
+                main_log_file.write(
+                    f"\n{'=' * 60}\n继续模拟 {datetime.now().isoformat()}: "
+                    f"从第 {state.resumed_from_round} 轮之后继续\n{'=' * 60}\n"
+                )
+                main_log_file.flush()
             
             # 设置子进程环境变量，确保 Windows 上使用 UTF-8 编码
             # 这可以修复第三方库（如 OASIS）读取文件时未指定编码的问题
@@ -806,8 +949,9 @@ class SimulationRunner:
         if not process or not state:
             return
         
-        twitter_position = 0
-        reddit_position = 0
+        resumed_positions = cls._resume_positions.pop(simulation_id, None) or {}
+        twitter_position = resumed_positions.get("twitter", 0)
+        reddit_position = resumed_positions.get("reddit", 0)
         
         monitor_error: Exception | None = None
         exit_code: int | None = None
@@ -1751,6 +1895,8 @@ class SimulationRunner:
             "stderr.log",
             "twitter_simulation.db",  # Twitter 平台数据库
             "reddit_simulation.db",   # Reddit 平台数据库
+            "twitter_simulation.db.ckpt",  # 每轮结束时的检查点（继续运行用）
+            "reddit_simulation.db.ckpt",
             "env_status.json",        # 环境状态文件
             # 每次运行重新生成的衍生文件
             "twitter_profiles.effective.csv",   # 附加了行为指令的 profile 副本（v2）

@@ -11,6 +11,9 @@ important, what its numbers do and do not mean. The design rationale and the acc
 3. You can run one prepared scenario **N times** with different seeds (an *ensemble*), ask every simulated agent
    a few questions at the end of each run, and look at the **spread** of the answers instead of a single run.
 4. A report can be written from an ensemble, and it quotes ranges instead of single numbers.
+5. A stopped or interrupted run can be **resumed** from its last finished round instead of started over
+   (see "Resuming a stopped run" below). The agents' chat memory is lost, so a resumed run is not identical to an
+   uninterrupted one.
 
 > **Read this before you trust a number.** An ensemble gives you distributions of *what simulated participants
 > said* across N stochastic runs. It is **not** a calibrated probability that the real-world event happens.
@@ -96,6 +99,65 @@ a post twice, for example) leaves no record.
 **What it does not guarantee:** identical text. The language model's output is not reproducible, so two runs with
 the same seed still differ in what the agents write, and those differences feed back into the run. Do not treat a
 seed as "replay this run".
+
+### Resuming a stopped run
+
+A run that was stopped (or whose process died) does not have to start over. **Resume** continues it after its last
+finished round, using the seed, the round limit, the platform databases and the action logs it already has. The
+normal "start over" path (`/start` with `force`) is unchanged and still deletes everything first.
+
+**What a resume does**
+
+1. Finds the resume point *k*: the last `round_end` in `actions.jsonl` (per platform; a parallel run resumes each
+   platform from its own *k*). A round that had started (`round_start`) but not finished is **redone**: the log is cut
+   back to the end of round *k*, so it contains nothing from the unfinished round.
+2. Keeps `twitter_simulation.db` / `reddit_simulation.db` and the logs. Nothing is deleted at startup and
+   `cleanup_simulation_logs` is not called.
+3. **Replays the scheduling** of rounds 1 to *k* without a single model call: the behavior engine's random
+   generators and the reaction delays (which depend on the initial posts and the scheduled events) end up exactly
+   where they were. The agents the replay picks for every finished round are compared with the logged
+   `active_agent_ids`; if they differ (the configuration or the seed changed since the run) the resume stops with an
+   error instead of continuing from a wrong state.
+4. Does not repeat the setup (seeded follows, initial posts), does not write a second `simulation_start`, and
+   continues the platform clocks (Twitter's step counter, Reddit's simulated time) so new posts are not older than
+   the restored ones. The log gets a `resume` marker.
+5. Runs rounds *k* + 1 to the end, then the final poll, as usual. A resumed run keeps its original start time;
+   `run_state.json` records `resumed_from_round`, `resume_count` and `resume_exact`.
+
+**What it cannot do - read this**
+
+> **Agents' chat memory cannot be restored.** It lives in the run process and is not saved. After a resume every
+> agent starts with a fresh conversation: it still knows its persona and sees the platform as it is (posts, follows,
+> the recommendation feed), but it does not remember its own earlier reasoning. A resumed run is therefore **not
+> identical** to one that was never interrupted, even with the same seed. The *schedule* is the same (the replay
+> guarantees that); what the agents write is not. The UI says so next to the Resume button.
+
+**Exact or not**
+
+After every finished round the run script saves a checkpoint of each platform database (`<db>.ckpt`, written with
+SQLite's backup API; it carries its round number inside, so the copy and its round can never disagree). A resume
+restores it, which also undoes anything the unfinished round had already written (some agents may have acted before
+the stop). That is an **exact** resume (`resume_exact: true`).
+
+A run started before checkpoints existed has none. It can still be resumed from the database as it is, but then the
+actions the unfinished round had already taken stay in the platform and the round is repeated on top of them
+(`resume_exact: false`). The UI warns about this case.
+
+**When it is offered**
+
+`GET /api/simulation/<id>/resume-info` answers `{resumable, reason, round, rounds, total_rounds, exact}`. A run can be
+resumed when it was stopped, failed, or was left "running" by a backend that died; it has a recorded seed; and both
+platforms finished setup (round 0). It cannot be resumed when it is already complete, still running or finishing, was
+run with the single-platform scripts (they write no structured log), or stopped while still setting up (start it
+over). In the UI, opening Step 3 of such a run shows "Resume from round *k*+1" and "Start over" instead of starting
+immediately.
+
+**Ensembles**
+
+`POST /api/simulation/ensemble/<id>/resume` (UI: the *Resume ensemble* button on a stopped, failed or partial
+ensemble). Finished runs are kept. Runs that were stopped or marked `interrupted` resume from their last finished
+round; a run that never produced anything (never started, or stopped during setup) starts over; a run that really
+failed (any other error) is left as it is. The ensemble is then aggregated under the usual rules.
 
 ---
 
@@ -184,7 +246,7 @@ The limits are 50 runs, up to 4 runs at once (the UI uses 1 at a time) and a man
   and some failures it is `partial` and the summary uses the runs that worked; with fewer than 2 it is `failed`.
 - If the backend restarts while an ensemble is running, runs whose processes are gone are marked failed with the
   error `interrupted`, and runs that had not started are marked stopped. Whatever finished is then aggregated under the
-  same rules. Ensembles are not resumed automatically.
+  same rules. Ensembles are not resumed automatically; use **Resume ensemble** (see "Resuming a stopped run").
 - A run's `simulation.log` says why agents stayed silent. With "402" or "429" errors the provider is throttling or out
   of credit: run fewer rounds, or add credit, and try again.
 - The run page shows this without opening the log. A status line says what the round is doing ("Round 12: 6 agents
@@ -204,7 +266,7 @@ backend/uploads/ensembles/<ensemble_id>/
   summary.json
   summary.md
 backend/uploads/simulations/<base>__<token>__r01 ...   one directory per run (config, profiles, databases, logs,
-                                                       final_poll.json)
+                                                       final_poll.json, <platform>_simulation.db.ckpt)
 ```
 
 ### API
@@ -217,6 +279,8 @@ All under `/api/simulation`. Responses are `{"success": bool, "data" | "error"}`
 | PUT | `/ensemble/<id>/outcome-questions` | `{outcome_questions: [...]}`; only while the status is `created`. |
 | POST | `/ensemble/<id>/start` | Starts the runs in the background. |
 | POST | `/ensemble/<id>/stop` | |
+| POST | `/ensemble/<id>/resume` | Continue a stopped, failed or partial ensemble; 409 if nothing can be resumed. |
+| GET | `/ensemble/<id>/resume-info` | `{resumable, replicates: [{simulation_id, action: resume | restart | skip, round, exact, reason}]}`. |
 | GET | `/ensemble/<id>` | Status, per-run progress (`current_round`/`total_rounds`) and the questions. |
 | GET | `/ensemble/<id>/summary` | 404 until the ensemble has been aggregated. |
 | GET | `/ensemble/list?simulation_id=` | Ensembles, newest first. |
@@ -253,6 +317,7 @@ tool needs a live simulation environment, which ensemble runs do not keep.
 |---|---|
 | Behavior logic (pure, unit tested) | `backend/scripts/sim_behavior.py` |
 | OASIS glue, final poll | `backend/scripts/sim_runtime.py`, `backend/scripts/sim_poll.py` |
+| Resume point, checkpoints, scheduling replay | `backend/scripts/sim_resume.py`; the runner side is `SimulationRunner.resume_info` / `start_simulation(resume=True)`; API `POST /api/simulation/resume`, `GET /api/simulation/<id>/resume-info` |
 | Ensemble runner | `backend/app/services/ensemble_runner.py` |
 | Aggregation (no LLM calls) | `backend/app/services/ensemble_aggregator.py` |
 | Outcome questions | `backend/app/services/outcome_questions.py` |

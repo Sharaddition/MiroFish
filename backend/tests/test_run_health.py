@@ -494,3 +494,32 @@ def test_fallback_calls_are_spaced_even_when_made_together():
     asyncio.run(together())
     # slots are 0.1 s apart; allow for the OS timer's granularity on each wake-up
     assert len(started) == 3 and started[-1] - started[0] >= 0.15
+
+
+# --- per-request timeout and retries ----------------------------------------------
+
+@pytest.mark.parametrize("env,expected", [
+    ({}, {}),
+    ({"LLM_MODEL_TIMEOUT": "60"}, {"timeout": 60.0}),
+    ({"LLM_MODEL_MAX_RETRIES": "0"}, {"max_retries": 0}),
+    ({"LLM_MODEL_TIMEOUT": "45", "LLM_MODEL_MAX_RETRIES": "1"}, {"timeout": 45.0, "max_retries": 1}),
+    ({"LLM_MODEL_TIMEOUT": "abc", "LLM_MODEL_MAX_RETRIES": "x"}, {}),
+    ({"LLM_MODEL_TIMEOUT": "-5", "LLM_MODEL_MAX_RETRIES": "-1"}, {}),
+    ({"LLM_MODEL_TIMEOUT": "", "LLM_MODEL_MAX_RETRIES": ""}, {}),
+])
+def test_model_client_options_come_from_the_environment(env, expected):
+    assert sim_runtime.model_client_options(env) == expected
+
+
+def test_the_options_reach_a_real_camel_client():
+    from camel.models import ModelFactory
+    from camel.types import ModelPlatformType
+
+    options = sim_runtime.model_client_options({"LLM_MODEL_TIMEOUT": "42", "LLM_MODEL_MAX_RETRIES": "0"})
+    model = sim_runtime.apply_model_client_options(ModelFactory.create(
+        model_platform=ModelPlatformType.OPENAI, model_type="m", api_key="k", url="http://127.0.0.1:1/v1",
+        **options,
+    ), options)
+    assert model._timeout == 42.0
+    assert model._client.max_retries == 0 and model._async_client.max_retries == 0   # camel alone leaves 3
+    assert model._client.timeout == 42.0

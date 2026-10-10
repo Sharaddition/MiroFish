@@ -109,6 +109,27 @@
       </div>
     </div>
 
+    <!-- A stopped run can continue where it stopped (or start over) -->
+    <div v-if="offerResume" class="resume-offer" role="region" :aria-label="$t('resume.title')">
+      <div class="resume-text">
+        <strong>{{ $t('resume.title') }}</strong>
+        <p>{{ $t('resume.offer', { round: resumeInfo.round, total: resumeInfo.total_rounds || maxRounds || '?', next: resumeInfo.round + 1 }) }}</p>
+        <p class="resume-note">{{ $t('resume.memoryNote') }}</p>
+        <p v-if="resumeInfo.exact === false" class="resume-note resume-warn">{{ $t('resume.inexactNote') }}</p>
+        <p v-if="resumeError" class="resume-note resume-error">{{ $t('resume.failed', { error: resumeError }) }}</p>
+      </div>
+      <div class="resume-buttons">
+        <button class="action-btn primary" :disabled="isResuming" @click="doResumeSimulation">
+          {{ isResuming ? $t('resume.resuming') : $t('resume.button', { next: resumeInfo.round + 1 }) }}
+        </button>
+        <button class="action-btn" :disabled="isResuming" @click="doStartSimulation">{{ $t('resume.startOver') }}</button>
+      </div>
+    </div>
+    <div v-if="!ensembleMode && runStatus.resumed_from_round != null" class="resume-chip">
+      {{ $t('resume.resumedChip', { round: runStatus.resumed_from_round }) }}
+      <span class="resume-chip-note">{{ $t('resume.memoryNote') }}</span>
+    </div>
+
     <!-- Why nothing seems to happen: what the round is doing now, and any model failure -->
     <div v-if="!ensembleMode && isRunActive" class="run-notices">
       <RunHealthBanner :health="runStatus.health" />
@@ -316,7 +337,9 @@ import {
   startSimulation,
   stopSimulation,
   getRunStatus,
-  getRunStatusDetail
+  getRunStatusDetail,
+  getResumeInfo,
+  resumeSimulation
 } from '../api/simulation'
 import { generateReport } from '../api/report'
 import EnsembleRunPanel from './EnsembleRunPanel.vue'
@@ -351,6 +374,13 @@ const isGeneratingReport = ref(false)
 const phase = ref(0) // 0: 未开始, 1: 运行中, 2: 已完成
 const isStarting = ref(false)
 const isStopping = ref(false)
+// A stopped run that can continue: { resumable, round, total_rounds, exact } (null when it cannot)
+const resumeInfo = ref(null)
+const isResuming = ref(false)
+const resumeError = ref('')
+const offerResume = computed(() => (
+  !ensembleMode.value && phase.value === 0 && !isStarting.value && !!resumeInfo.value?.resumable
+))
 const startError = ref(null)
 const runStatus = ref({})
 // The process is working (or finishing up): the live status line and the failure banner only matter then
@@ -412,7 +442,51 @@ const resetAllState = () => {
   startError.value = null
   isStarting.value = false
   isStopping.value = false
+  resumeInfo.value = null
+  resumeError.value = ''
   stopPolling()  // 停止之前可能存在的轮询
+}
+
+// 已停止的运行能否继续（出错时按"不能继续"处理，走原来的重新开始流程）
+const loadResumeInfo = async () => {
+  try {
+    const res = await getResumeInfo(props.simulationId)
+    resumeInfo.value = res.success && res.data?.resumable ? res.data : null
+  } catch (err) {
+    resumeInfo.value = null
+  }
+  return resumeInfo.value
+}
+
+// 从最后完成的一轮之后继续（保留数据库与日志）
+const doResumeSimulation = async () => {
+  if (!props.simulationId || !resumeInfo.value || isResuming.value) return
+  const next = resumeInfo.value.round + 1
+  isResuming.value = true
+  resumeError.value = ''
+  addLog(t('resume.logResuming', { next }))
+  try {
+    const res = await resumeSimulation({
+      simulation_id: props.simulationId,
+      enable_graph_memory_update: true
+    })
+    if (res.success && res.data) {
+      resetAllState()
+      addLog(t('resume.logResumed'))
+      addLog(`  ├─ PID: ${res.data.process_pid || '-'}`)
+      phase.value = 1
+      runStatus.value = res.data
+      emit('update-status', 'processing')
+      startStatusPolling()
+      startDetailPolling()
+    } else {
+      resumeError.value = res.error || t('common.unknownError')
+    }
+  } catch (err) {
+    resumeError.value = err?.response?.data?.error || err.message
+  } finally {
+    isResuming.value = false
+  }
 }
 
 // 启动模拟
@@ -724,10 +798,16 @@ watch(() => props.systemLogs?.length, () => {
   })
 })
 
-onMounted(() => {
+onMounted(async () => {
   addLog(t('log.step3Init'))
   if (props.simulationId && !ensembleMode.value) {
-    doStartSimulation()
+    // A run that was stopped part-way can continue; otherwise it starts as before.
+    const info = await loadResumeInfo()
+    if (info) {
+      addLog(t('resume.logOffer', { round: info.round }))
+    } else {
+      doStartSimulation()
+    }
   }
 })
 
@@ -959,6 +1039,72 @@ onUnmounted(() => {
 
 /* --- Main Content Area --- */
 /* The live round status and the model-failure banner, between the control bar and the timeline */
+.resume-offer {
+  flex-shrink: 0;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin: 12px 24px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--c-e5e7eb);
+  border-left: 3px solid var(--c-f59e0b);
+  border-radius: 8px;
+  background: var(--c-f9fafb);
+  color: var(--c-111827);
+  font-size: 0.85rem;
+}
+
+.resume-text {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.resume-text p {
+  margin: 4px 0 0;
+}
+
+.resume-note {
+  font-size: 0.78rem;
+  color: var(--c-6b7280);
+}
+
+.resume-warn {
+  color: var(--c-4b5563);
+}
+
+.resume-error {
+  color: var(--c-dc2626);
+}
+
+.resume-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.resume-offer .action-btn:not(.primary) {
+  border: 1px solid var(--c-d1d5db);
+  background: var(--c-ffffff);
+  color: var(--c-4b5563);
+}
+
+.resume-chip {
+  flex-shrink: 0;
+  margin: 10px 24px 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--c-4b5563);
+}
+
+.resume-chip-note {
+  display: block;
+  margin-top: 2px;
+  font-weight: 400;
+  color: var(--c-6b7280);
+}
+
 .run-notices {
   flex-shrink: 0;
   padding: 14px 24px 2px;

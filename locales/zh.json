@@ -384,6 +384,7 @@
     "graphNotBuilt": "项目尚未构建图谱，请先调用 /api/graph/build",
     "requireSimulationId": "请提供 simulation_id",
     "deleteRunBusy": "请先停止后再删除：{reasons}",
+    "resumeNotPossible": "此运行无法继续：{reason}",
     "simulationNotFound": "模拟不存在: {id}",
     "projectMissingRequirement": "项目缺少模拟需求描述 (simulation_requirement)",
     "prepareStarted": "准备任务已启动，请通过 /api/simulation/prepare/status 查询进度",
@@ -751,6 +752,26 @@
       "twitter": "信息广场",
       "reddit": "话题社区"
     }
+  },
+  "resume": {
+    "title": "该运行在结束前被停止",
+    "offer": "已完成第 {round} / {total} 轮。要从第 {next} 轮继续，还是重新开始？",
+    "button": "从第 {next} 轮继续",
+    "startOver": "重新开始",
+    "resuming": "正在继续...",
+    "memoryNote": "Agent 的对话记忆无法恢复，所以继续后的运行与不中断的运行并不完全相同：Agent 记得自己在平台上看到的内容，但不记得之前的思考过程。",
+    "inexactNote": "该运行没有每轮结束时的检查点，因此未完成的那一轮已经做过的事情会保留在平台上，并在其基础上重做该轮。",
+    "resumedChip": "已在第 {round} 轮之后继续",
+    "failed": "无法继续：{error}",
+    "logOffer": "运行在第 {round} 轮之后停止，可以继续。",
+    "logResuming": "正在从第 {next} 轮继续...",
+    "logResumed": "已继续；平台数据库与日志均已保留。",
+    "ensembleTitle": "部分运行被中断",
+    "ensembleOffer": "有 {count} 个运行可以从中断处继续；已完成的运行会保留。",
+    "ensembleButton": "继续集合运行",
+    "ensembleRestart": "有 {count} 个运行还没开始，将重新开始。",
+    "ensembleRunLine": "{index}：从第 {round} 轮之后继续",
+    "ensembleRunRestart": "{index}：重新开始"
   },
   "ensemble": {
     "title": "集合运行",
