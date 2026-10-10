@@ -421,3 +421,50 @@ def test_a_reasoning_block_before_the_json_costs_no_retry(monkeypatch):
     calls, sleeps = script_llm(monkeypatch, [reply])
     assert make_generator()._call_llm_with_retry("p", "s") == {"ok": 3}
     assert len(calls) == 1 and sleeps == []
+
+
+def raw_response(text):
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text), finish_reason="stop")])
+
+
+def test_a_reply_that_is_a_one_item_list_is_unwrapped(monkeypatch):
+    calls, _ = script_llm(monkeypatch, [raw_response('[{"initial_posts": []}]')])
+    assert make_generator()._call_llm_with_retry("p", "s") == {"initial_posts": []}
+    assert len(calls) == 1
+
+
+def test_a_reply_that_is_not_an_object_is_retried_not_returned(monkeypatch):
+    calls, _ = script_llm(monkeypatch, [raw_response('[1, 2]'), raw_response('"text"'), raw_response('{"ok": 4}')])
+    assert make_generator()._call_llm_with_retry("p", "s") == {"ok": 4}
+    assert len(calls) == 3
+
+
+def test_it_gives_up_with_a_clear_error_when_every_reply_is_a_list(monkeypatch):
+    script_llm(monkeypatch, [raw_response('[1, 2]')] * 3)
+    with pytest.raises(ValueError, match="expected a JSON object"):
+        make_generator()._call_llm_with_retry("p", "s")
+
+
+def test_a_separate_preparation_model_is_used_for_personas_and_config(monkeypatch):
+    from app.config import Config
+    from app.services.oasis_profile_generator import OasisProfileGenerator
+
+    monkeypatch.setattr(Config, "LLM_PREP_API_KEY", "prep-key")
+    monkeypatch.setattr(Config, "LLM_PREP_MODEL_NAME", "fast-model")
+    monkeypatch.setattr(Config, "LLM_PREP_BASE_URL", None)
+    monkeypatch.setattr(Config, "LLM_BASE_URL", "https://main.example/v1")
+
+    config_generator = gen.SimulationConfigGenerator()
+    profile_generator = OasisProfileGenerator()
+    for generator in (config_generator, profile_generator):
+        assert generator.model_name == "fast-model"
+        assert generator.api_key == "prep-key"
+        assert generator.base_url == "https://main.example/v1"   # falls back to the main endpoint
+
+
+def test_without_a_preparation_model_the_main_one_is_used(monkeypatch):
+    from app.config import Config
+
+    monkeypatch.setattr(Config, "LLM_PREP_API_KEY", None)
+    monkeypatch.setattr(Config, "LLM_PREP_MODEL_NAME", "fast-model")   # key missing: not usable
+    assert Config.prep_llm()["model_name"] == Config.LLM_MODEL_NAME

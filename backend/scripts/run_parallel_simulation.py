@@ -211,6 +211,17 @@ REDDIT_ACTIONS = [
 
 
 # IPC相关常量
+def default_llm_concurrency() -> int:
+    """Max simultaneous model requests per platform: LLM_MAX_CONCURRENCY from .env, else 30.
+
+    Lower it when the provider answers HTTP 429 (rate limit / quota).
+    """
+    try:
+        return max(1, int(os.environ.get("LLM_MAX_CONCURRENCY") or 30))
+    except ValueError:
+        return 30
+
+
 MAX_CONSECUTIVE_STEP_FAILURES = 5  # env.step errors in a row before a platform gives up
 
 IPC_COMMANDS_DIR = "ipc_commands"
@@ -1146,7 +1157,7 @@ async def _run_platform_simulation(
         platform=spec["platform_type"],
         database_path=db_path,
         # 限制最大并发 LLM 请求数，防止 API 过载（并发运行多个副本时每个副本分到的额度更小）
-        semaphore=int((run_settings or {}).get("llm_semaphore") or 30),
+        semaphore=int((run_settings or {}).get("llm_semaphore") or default_llm_concurrency()),
     )
 
     await result.env.reset()

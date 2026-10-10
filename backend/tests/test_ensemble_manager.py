@@ -292,7 +292,8 @@ def test_a_missing_base_does_not_leave_directories_behind(env):
 
 # --- create: what gets cloned --------------------------------------------------------------------
 
-def test_create_clones_only_the_definition_files(env):
+def test_create_clones_only_the_definition_files(env, monkeypatch):
+    monkeypatch.delenv("LLM_MAX_CONCURRENCY", raising=False)  # the developer's .env may set it
     ensemble = create(env, llm_temperature=0.4, concurrency=2)
     token = ensemble["ensemble_id"][4:]
     assert [r["simulation_id"] for r in ensemble["replicates"]] == [
@@ -882,3 +883,12 @@ def test_reads_during_a_busy_run_never_fail(env, monkeypatch):
             thread.join(timeout=10)
     assert errors == []
     assert status_of(ensemble["ensemble_id"]) == "completed"
+
+
+@pytest.mark.parametrize("value,expected", [(None, 30), ("3", 3), ("0", 1), ("abc", 30)])
+def test_llm_concurrency_can_be_lowered_from_the_environment(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("LLM_MAX_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("LLM_MAX_CONCURRENCY", value)
+    assert er._base_llm_semaphore() == expected

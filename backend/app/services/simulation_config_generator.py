@@ -634,9 +634,10 @@ class SimulationConfigGenerator:
         model_name: Optional[str] = None,
         request_timeout: Optional[float] = None,
     ):
-        self.api_key = api_key or Config.LLM_API_KEY
-        self.base_url = base_url or Config.LLM_BASE_URL
-        self.model_name = model_name or Config.LLM_MODEL_NAME
+        prep = Config.prep_llm()
+        self.api_key = api_key or prep["api_key"]
+        self.base_url = base_url or prep["base_url"]
+        self.model_name = model_name or prep["model_name"]
         timeout = float(request_timeout or Config.LLM_REQUEST_TIMEOUT)
         self.request_timeout = timeout if timeout > 0 else DEFAULT_LLM_REQUEST_TIMEOUT
         # 供界面显示重试/等待状态；由 generate_config 设置
@@ -916,16 +917,25 @@ class SimulationConfigGenerator:
 
                 # 尝试解析JSON
                 try:
-                    return json.loads(content)
+                    parsed = json.loads(content)
                 except json.JSONDecodeError as e:
                     logger.warning(f"JSON解析失败 (attempt {attempt+1}): {str(e)[:80]}")
 
                     # 尝试修复JSON
-                    fixed = self._try_fix_config_json(content)
-                    if fixed:
-                        return fixed
+                    parsed = self._try_fix_config_json(content)
+                    if parsed is None:
+                        last_error = e
+                        reason = t('progress.llmBadJson')
 
-                    last_error = e
+                if parsed is not None:
+                    # Callers read the result with .get(); a reply that is a list
+                    # (often the object wrapped in [ ]) must not reach them.
+                    if isinstance(parsed, list) and len(parsed) == 1:
+                        parsed = parsed[0]
+                    if isinstance(parsed, dict):
+                        return parsed
+                    last_error = ValueError(f"model returned {type(parsed).__name__}, expected a JSON object")
+                    logger.warning(f"模型返回的不是JSON对象 (attempt {attempt+1}): {type(parsed).__name__}")
                     reason = t('progress.llmBadJson')
 
             except Exception as e:

@@ -249,9 +249,10 @@ class OasisProfileGenerator:
         zep_api_key: Optional[str] = None,
         graph_id: Optional[str] = None
     ):
-        self.api_key = api_key or Config.LLM_API_KEY
-        self.base_url = base_url or Config.LLM_BASE_URL
-        self.model_name = model_name or Config.LLM_MODEL_NAME
+        prep = Config.prep_llm()
+        self.api_key = api_key or prep["api_key"]
+        self.base_url = base_url or prep["base_url"]
+        self.model_name = model_name or prep["model_name"]
         
         if not self.api_key:
             raise ValueError("LLM_API_KEY 未配置")

@@ -55,7 +55,15 @@ MAX_ROUNDS_LIMIT = 100000
 MIN_REPLICATES_TO_AGGREGATE = 2
 POLL_INTERVAL_SECONDS = 2.0
 #: Maximum concurrent LLM requests per platform for one run; shared among replicates.
-BASE_LLM_SEMAPHORE = 30
+def _base_llm_semaphore() -> int:
+    """LLM_MAX_CONCURRENCY from .env (shared by the ensemble's runs), default 30."""
+    try:
+        return max(1, int(os.environ.get("LLM_MAX_CONCURRENCY") or 30))
+    except ValueError:
+        return 30
+
+
+BASE_LLM_SEMAPHORE = 30  # default, kept for reference; see _base_llm_semaphore()
 PLATFORMS_SUPPORTED = ("parallel",)
 
 TERMINAL_STATUSES = ("completed", "partial", "failed", "stopped")
@@ -390,7 +398,7 @@ class EnsembleManager:
             max_rounds=max_rounds,
             outcome_questions=copy.deepcopy(questions),
             # replicates share the provider's rate limit
-            llm_semaphore=max(1, BASE_LLM_SEMAPHORE // concurrency),
+            llm_semaphore=max(1, _base_llm_semaphore() // concurrency),
         )
         if llm_temperature is not None:
             run["llm_temperature"] = llm_temperature
