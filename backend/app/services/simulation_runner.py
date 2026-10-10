@@ -495,8 +495,17 @@ class SimulationRunner:
         
         data = state.to_detail_dict()
         
-        with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        # Written in one step: the monitor saves every 2 s, and a reader that opens the file
+        # in between must never see it empty or half written.
+        try:
+            write_json_atomic(state_file, data)
+        except OSError as error:
+            # Windows refuses the rename while a reader (the UI poll, a script) has the file open at that
+            # very moment, and the retries ran out. This save is not worth failing the run for: write in
+            # place like before (a reader may then catch it half written once) and carry on.
+            logger.warning(f"原子写入 run_state.json 失败，改为直接写入: {error}")
+            with open(state_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
         
         cls._run_states[state.simulation_id] = state
 

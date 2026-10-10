@@ -407,6 +407,8 @@ class EnsembleManager:
             outcome_questions=copy.deepcopy(questions),
             # replicates share the provider's rate limit
             llm_semaphore=max(1, _base_llm_semaphore() // concurrency),
+            # how many replicates run at once; the run script divides each platform's cap by it
+            llm_concurrency_share=concurrency,
         )
         if llm_temperature is not None:
             run["llm_temperature"] = llm_temperature

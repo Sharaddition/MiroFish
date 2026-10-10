@@ -73,6 +73,7 @@ import random
 import secrets
 import signal
 import sqlite3
+import time
 import warnings
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
@@ -212,17 +213,6 @@ REDDIT_ACTIONS = [
 
 
 # IPC相关常量
-def default_llm_concurrency() -> int:
-    """Max simultaneous model requests per platform: LLM_MAX_CONCURRENCY from .env, else 30.
-
-    Lower it when the provider answers HTTP 429 (rate limit / quota).
-    """
-    try:
-        return max(1, int(os.environ.get("LLM_MAX_CONCURRENCY") or 30))
-    except ValueError:
-        return 30
-
-
 MAX_CONSECUTIVE_STEP_FAILURES = 5  # env.step errors in a row before a platform gives up
 
 IPC_COMMANDS_DIR = "ipc_commands"
@@ -267,13 +257,24 @@ class ParallelIPCHandler:
     
     def update_status(self, status: str):
         """更新环境状态"""
-        with open(self.status_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                "status": status,
-                "twitter_available": self.twitter_env is not None,
-                "reddit_available": self.reddit_env is not None,
-                "timestamp": datetime.now().isoformat()
-            }, f, ensure_ascii=False, indent=2)
+        payload = {
+            "status": status,
+            "twitter_available": self.twitter_env is not None,
+            "reddit_available": self.reddit_env is not None,
+            "timestamp": datetime.now().isoformat()
+        }
+        # write-then-rename so the backend never reads a half-written file
+        temp_file = self.status_file + ".tmp"
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        for attempt in range(5):
+            try:
+                os.replace(temp_file, self.status_file)
+                break
+            except PermissionError:  # Windows: the reader has the file open for a moment
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
     
     def poll_command(self) -> Optional[Dict[str, Any]]:
         """轮询获取待处理命令"""
@@ -1237,12 +1238,14 @@ async def _run_platform_simulation(
     if os.path.exists(db_path) and not resume:
         os.remove(db_path)
 
+    concurrency = sim_runtime.platform_llm_concurrency(platform, run_settings, os.environ)
+    log_info(f"模型并发上限: {concurrency}")
     result.env = oasis.make(
         agent_graph=result.agent_graph,
         platform=spec["platform_type"],
         database_path=db_path,
         # 限制最大并发 LLM 请求数，防止 API 过载（并发运行多个副本时每个副本分到的额度更小）
-        semaphore=int((run_settings or {}).get("llm_semaphore") or default_llm_concurrency()),
+        semaphore=concurrency,
     )
 
     await result.env.reset()

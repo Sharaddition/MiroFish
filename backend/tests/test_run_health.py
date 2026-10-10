@@ -523,3 +523,26 @@ def test_the_options_reach_a_real_camel_client():
     assert model._timeout == 42.0
     assert model._client.max_retries == 0 and model._async_client.max_retries == 0   # camel alone leaves 3
     assert model._client.timeout == 42.0
+
+
+# --- per-platform concurrency -----------------------------------------------------------
+
+@pytest.mark.parametrize("platform,run_settings,env,expected", [
+    ("twitter", None, {}, 30),                                                        # the default
+    ("twitter", None, {"LLM_MAX_CONCURRENCY": "3"}, 3),                              # one number for both
+    ("reddit", None, {"LLM_MAX_CONCURRENCY": "3"}, 3),
+    ("twitter", None, {"LLM_MAX_CONCURRENCY": "1", "LLM_REDDIT_MAX_CONCURRENCY": "8"}, 1),   # per platform
+    ("reddit", None, {"LLM_MAX_CONCURRENCY": "1", "LLM_REDDIT_MAX_CONCURRENCY": "8"}, 8),
+    ("twitter", None, {"LLM_TWITTER_MAX_CONCURRENCY": "2"}, 2),                      # no general value needed
+    ("reddit", None, {"LLM_TWITTER_MAX_CONCURRENCY": "2"}, 30),
+    ("reddit", {"llm_semaphore": 5}, {}, 5),                                         # a config's own number
+    ("reddit", {"llm_semaphore": 5}, {"LLM_REDDIT_MAX_CONCURRENCY": "8"}, 8),        # the environment wins
+    ("twitter", {"llm_concurrency_share": 2, "llm_semaphore": 15}, {}, 15),         # replicates divide the default
+    ("twitter", {"llm_concurrency_share": 2}, {"LLM_MAX_CONCURRENCY": "4"}, 2),
+    ("reddit", {"llm_concurrency_share": 2}, {"LLM_MAX_CONCURRENCY": "4", "LLM_REDDIT_MAX_CONCURRENCY": "8"}, 4),
+    ("reddit", {"llm_concurrency_share": 4}, {"LLM_REDDIT_MAX_CONCURRENCY": "2"}, 1),   # never below one
+    ("twitter", None, {"LLM_MAX_CONCURRENCY": "abc", "LLM_TWITTER_MAX_CONCURRENCY": "0"}, 30),   # junk is ignored
+    ("twitter", {"llm_concurrency_share": "x"}, {"LLM_MAX_CONCURRENCY": "6"}, 6),
+])
+def test_each_platform_gets_its_own_concurrency(platform, run_settings, env, expected):
+    assert sim_runtime.platform_llm_concurrency(platform, run_settings, env) == expected

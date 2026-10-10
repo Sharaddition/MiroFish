@@ -13,6 +13,7 @@ from datetime import datetime
 from enum import Enum
 
 from ..config import Config
+from ..utils.atomic_write import write_json_atomic
 from ..utils.logger import get_logger
 from .zep_entity_reader import ZepEntityReader, FilteredEntities
 from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
@@ -173,8 +174,13 @@ class SimulationManager:
         
         state.updated_at = datetime.now().isoformat()
         
-        with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump(state.to_dict(), f, ensure_ascii=False, indent=2)
+        try:
+            write_json_atomic(state_file, state.to_dict())  # readers never see a half-written file
+        except OSError as error:
+            # the rename can be refused on Windows while a reader has the file open; write in place instead
+            logger.warning(f"原子写入 state.json 失败，改为直接写入: {error}")
+            with open(state_file, 'w', encoding='utf-8') as f:
+                json.dump(state.to_dict(), f, ensure_ascii=False, indent=2)
         
         self._simulations[state.simulation_id] = state
     

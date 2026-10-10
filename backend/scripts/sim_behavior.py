@@ -590,6 +590,7 @@ def resolve_run_settings(
         "llm_temperature": run.get("llm_temperature"),
         "llm_pass_seed": bool(run.get("llm_pass_seed", False)),
         "llm_semaphore": run.get("llm_semaphore"),
+        "llm_concurrency_share": run.get("llm_concurrency_share"),
         "outcome_questions": run.get("outcome_questions") or [],
     }
 

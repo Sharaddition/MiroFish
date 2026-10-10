@@ -28,8 +28,22 @@ class Config:
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    LLM_USER_AGENT = os.environ.get('LLM_USER_AGENT', 'opencode/1.0.0')
     # 配置生成阶段单次LLM请求的最长等待时间（秒）；超时后重试，而不是无限等待
     LLM_REQUEST_TIMEOUT = float(os.environ.get('LLM_REQUEST_TIMEOUT', '300'))
+
+    @classmethod
+    def get_llm_user_agent(cls) -> str:
+        """Return the normalized User-Agent string for LLM requests (e.g. 'opencode/1.0.0')."""
+        ua = (cls.LLM_USER_AGENT or os.environ.get('LLM_USER_AGENT') or 'opencode/1.0.0').strip()
+        if ua and '/' not in ua:
+            ua = f"{ua}/1.0.0"
+        return ua or 'opencode/1.0.0'
+
+    @classmethod
+    def get_llm_default_headers(cls) -> dict:
+        """Return default headers including User-Agent to pass to LLM clients."""
+        return {"User-Agent": cls.get_llm_user_agent()}
 
     # Optional stronger/faster model used only while PREPARING a simulation
     # (agent personas and the simulation config). Needs LLM_PREP_API_KEY and

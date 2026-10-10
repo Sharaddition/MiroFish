@@ -309,7 +309,7 @@ def test_create_clones_only_the_definition_files(env, monkeypatch):
         assert config["behavior_version"] == 2
         assert config["run"] == {
             "seed": replicate["seed"], "replicate_index": replicate["index"], "ensemble_id": ensemble["ensemble_id"],
-            "max_rounds": 12, "outcome_questions": QUESTIONS, "llm_semaphore": 15, "llm_temperature": 0.4,
+            "max_rounds": 12, "outcome_questions": QUESTIONS, "llm_semaphore": 15, "llm_concurrency_share": 2, "llm_temperature": 0.4,
         }
         state = json.loads((rep_dir / "state.json").read_text(encoding="utf-8"))
         assert state["status"] == "ready" and state["simulation_id"] == replicate["simulation_id"]

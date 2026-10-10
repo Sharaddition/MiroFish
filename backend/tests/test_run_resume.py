@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,9 @@ from app.services.simulation_manager import SimulationManager, SimulationState, 
 from app.services.simulation_runner import RunnerStatus, SimulationRunState, SimulationRunner
 
 from test_sim_resume import action, finished_rounds, make_db, posts, round_end, round_start, write_log
+
+# the fixture below replaces threading.Thread globally; keep the real class for tests that need a thread
+REAL_THREAD = threading.Thread
 
 SIM = "sim_resume"
 SEED = 4242
@@ -316,3 +320,94 @@ def test_the_resume_endpoint_validates_its_input(client, world):
     assert client.post("/api/simulation/resume", json={}).status_code == 400
     assert client.post("/api/simulation/resume", json={"simulation_id": "nope"}).status_code == 404
     assert client.post("/api/simulation/resume", json={"simulation_id": SIM, "enable_graph_memory_update": "yes"}).status_code == 400
+
+
+# --- state files are written in one step ---------------------------------------------------------
+
+def make_running_state():
+    return SimulationRunState(simulation_id=SIM, runner_status=RunnerStatus.RUNNING, total_rounds=40, seed=SEED)
+
+
+def test_the_run_state_file_is_only_replaced_when_the_new_one_is_complete(world, monkeypatch):
+    """Until the final swap the old, complete file stays in place (the old code truncated it first)."""
+    from app.utils import atomic_write
+
+    state = make_running_state()
+    state.current_round = 1
+    SimulationRunner._save_run_state(state)
+    state_file = world.sim_dir / "run_state.json"
+    seen = []
+    real_replace = atomic_write.os.replace
+
+    def checking_replace(source, target):
+        seen.append(json.loads(state_file.read_text("utf-8"))["current_round"])      # still the previous round, complete
+        assert json.loads(open(source, encoding="utf-8").read())["current_round"] == 2   # the new content is already whole
+        return real_replace(source, target)
+
+    monkeypatch.setattr(atomic_write.os, "replace", checking_replace)
+    state.current_round = 2
+    SimulationRunner._save_run_state(state)
+
+    assert seen == [1]
+    assert json.loads(state_file.read_text("utf-8"))["current_round"] == 2
+    assert [p.name for p in world.sim_dir.iterdir() if p.suffix == ".tmp"] == []
+
+
+def test_a_reader_polling_while_the_monitor_saves_never_sees_a_broken_file(world):
+    state_file = world.sim_dir / "run_state.json"
+    state = make_running_state()
+    SimulationRunner._save_run_state(state)
+    stop = threading.Event()
+    bad = []
+
+    def read():
+        while not stop.is_set():
+            try:
+                json.loads(state_file.read_text(encoding="utf-8"))
+            except PermissionError:
+                pass                                             # Windows: the rename is in progress
+            except (FileNotFoundError, ValueError) as error:
+                bad.append(repr(error))
+            time.sleep(0.003)
+
+    reader = REAL_THREAD(target=read)
+    reader.start()
+    try:
+        for round_num in range(200):
+            state.current_round = round_num
+            SimulationRunner._save_run_state(state)
+    finally:
+        stop.set()
+        reader.join()
+
+    assert bad == []
+    assert json.loads(state_file.read_text("utf-8"))["current_round"] == 199
+
+
+def test_a_refused_rename_does_not_lose_the_save(world, monkeypatch):
+    """If Windows keeps refusing the rename, the state is still written (in place) and the run goes on."""
+    def refuse(*_args, **_kwargs):
+        raise PermissionError("[WinError 5] Access is denied")
+
+    monkeypatch.setattr(runner_module, "write_json_atomic", refuse)
+    state = make_running_state()
+    state.current_round = 7
+    SimulationRunner._save_run_state(state)
+
+    assert json.loads((world.sim_dir / "run_state.json").read_text("utf-8"))["current_round"] == 7
+    assert SimulationRunner._run_states[SIM] is state
+
+
+def test_the_simulation_record_is_written_the_same_way(world, monkeypatch):
+    import app.services.simulation_manager as manager_module
+
+    manager = SimulationManager()
+    state = SimulationState(simulation_id=SIM, project_id="proj_x", graph_id="g", status=SimulationStatus.READY)
+    for _ in range(20):
+        manager._save_simulation_state(state)
+        json.loads((world.sim_dir / "state.json").read_text("utf-8"))
+    assert [p.name for p in world.sim_dir.iterdir() if p.suffix == ".tmp"] == []
+
+    monkeypatch.setattr(manager_module, "write_json_atomic", lambda *a, **k: (_ for _ in ()).throw(PermissionError("denied")))
+    manager._save_simulation_state(state)                       # falls back to writing in place
+    assert json.loads((world.sim_dir / "state.json").read_text("utf-8"))["simulation_id"] == SIM

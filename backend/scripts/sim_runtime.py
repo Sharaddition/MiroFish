@@ -159,6 +159,48 @@ def should_fall_back(error: BaseException) -> bool:
     return status == 413  # request too large for this model's per-minute token limit
 
 
+DEFAULT_LLM_CONCURRENCY = 30
+
+
+def platform_llm_concurrency(
+    platform: str,
+    run_settings: Optional[Mapping[str, Any]],
+    environ: Mapping[str, str],
+) -> int:
+    """Max simultaneous model requests for one platform of a run.
+
+    1. ``LLM_<PLATFORM>_MAX_CONCURRENCY`` (``LLM_TWITTER_...`` / ``LLM_REDDIT_...``) when set: that platform's own cap.
+    2. else ``LLM_MAX_CONCURRENCY`` (default 30) for every platform.
+    3. A replicate of an ensemble shares the provider with the other replicates running at the same time
+       (``llm_concurrency_share``), so it gets its share of the number from 1 or 2.
+    Older replicates carry a precomputed ``llm_semaphore`` instead; a plain run may set ``run.llm_semaphore``
+    in its config. Both are used when neither 1 nor a share applies.
+    """
+    def read(name: str) -> Optional[int]:
+        try:
+            value = int(environ.get(name) or 0)
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
+    settings = run_settings or {}
+    specific = read(f"LLM_{platform.upper()}_MAX_CONCURRENCY")
+    general = read("LLM_MAX_CONCURRENCY")
+    try:
+        share = max(1, int(settings.get("llm_concurrency_share") or 1))
+    except (TypeError, ValueError):
+        share = 1
+    has_share = bool(settings.get("llm_concurrency_share"))
+
+    if specific is not None:
+        return max(1, specific // share)
+    if has_share:
+        return max(1, (general or DEFAULT_LLM_CONCURRENCY) // share)
+    if settings.get("llm_semaphore"):
+        return max(1, int(settings["llm_semaphore"]))
+    return general or DEFAULT_LLM_CONCURRENCY
+
+
 def model_client_options(environ: Mapping[str, str]) -> Dict[str, Any]:
     """``timeout`` / ``max_retries`` for the model client, from LLM_MODEL_TIMEOUT / LLM_MODEL_MAX_RETRIES.
 
@@ -181,25 +223,48 @@ def model_client_options(environ: Mapping[str, str]) -> Dict[str, Any]:
             retries = -1
         if retries >= 0:
             options["max_retries"] = retries
+    raw_ua = environ.get("LLM_USER_AGENT")
+    if raw_ua:
+        ua = raw_ua.strip()
+        if ua and "/" not in ua:
+            ua = f"{ua}/1.0.0"
+        if ua:
+            options["default_headers"] = {"User-Agent": ua}
     return options
 
 
 def apply_model_client_options(model: Any, options: Mapping[str, Any]) -> Any:
-    """Make ``max_retries`` take effect on a camel OpenAI model.
+    """Make ``max_retries`` and custom headers (e.g. User-Agent) take effect on a camel OpenAI model.
 
     camel's OpenAIModel accepts ``max_retries`` but its base class resets it to 3 before the clients are
     built, so the factory argument alone does nothing. The SDK clients read ``max_retries`` on every
     request, so setting it on them works. (``timeout`` is honoured by the factory as is.)
     """
-    if "max_retries" not in options:
-        return model
-    retries = int(options["max_retries"])
-    for name in ("_client", "_async_client"):
-        client = getattr(model, name, None)
-        if client is not None and hasattr(client, "max_retries"):
-            client.max_retries = retries
-    if hasattr(model, "_max_retries"):
-        model._max_retries = retries
+    if "max_retries" in options:
+        retries = int(options["max_retries"])
+        for name in ("_client", "_async_client"):
+            client = getattr(model, name, None)
+            if client is not None and hasattr(client, "max_retries"):
+                client.max_retries = retries
+        if hasattr(model, "_max_retries"):
+            model._max_retries = retries
+
+    ua = (
+        options.get("default_headers", {}).get("User-Agent")
+        or os.environ.get("LLM_USER_AGENT")
+    )
+    if ua:
+        ua = str(ua).strip()
+        if "/" not in ua:
+            ua = f"{ua}/1.0.0"
+        for name in ("_client", "_async_client"):
+            client = getattr(model, name, None)
+            if client is not None:
+                if hasattr(client, "_custom_headers"):
+                    client._custom_headers["User-Agent"] = ua
+                if hasattr(client, "default_headers"):
+                    client.default_headers["User-Agent"] = ua
+
     return model
 
 
