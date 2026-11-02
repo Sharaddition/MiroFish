@@ -221,6 +221,21 @@ def _as_text(value: Any) -> Optional[str]:
     return str(value)
 
 
+def unwrap_layout(response: Any, model: Any) -> Any:
+    """An answer that echoes the schema's layout (``{"properties": {...}}``) is reduced to the inner object.
+
+    Some models do this for any structured answer, including Graphiti's own (e.g. ``EdgeDuplicate``), which then
+    fails with "Field required". Only acts when none of the model's fields are at the top and exactly one nested
+    object has some of them; any other answer is returned untouched.
+    """
+    fields = set(getattr(model, "model_fields", {}) or {})
+    if isinstance(response, dict) and fields and not fields & set(response):
+        wrapped = [v for v in response.values() if isinstance(v, dict) and fields & set(v)]
+        if len(wrapped) == 1:
+            return wrapped[0]
+    return response
+
+
 def sanitize_attributes(response: Any, model: Any) -> Any:
     """The model's answer for an entity's or edge's attributes, reduced to what the ontology declares, as text.
 
@@ -235,10 +250,7 @@ def sanitize_attributes(response: Any, model: Any) -> Any:
     fields = set(getattr(model, "model_fields", {}) or {})
     if not fields:
         return {}
-    if not fields & set(response):
-        wrapped = [v for v in response.values() if isinstance(v, dict) and fields & set(v)]
-        if len(wrapped) == 1:
-            response = wrapped[0]
+    response = unwrap_layout(response, model)
     return {key: _as_text(value) for key, value in response.items() if key in fields}
 
 
@@ -759,13 +771,15 @@ class GraphitiEngine:
         from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient as _GenericClient
 
         class OpenAIGenericClient(_GenericClient):
-            """Graphiti's OpenAI-compatible client, with the attribute answers made safe to store (see sanitize_attributes)."""
+            """Graphiti's OpenAI-compatible client, with the attribute answers made safe to store (see sanitize_attributes) and echoed schema layouts unwrapped."""
 
             async def generate_response(self, messages, response_model=None, *args, **kwargs):
                 result = await super().generate_response(messages, response_model, *args, **kwargs)
-                if response_model is not None and is_custom_type(response_model):
+                if response_model is None:
+                    return result
+                if is_custom_type(response_model):
                     return sanitize_attributes(result, response_model)
-                return result
+                return unwrap_layout(result, response_model)
 
         os.environ.setdefault("SEMAPHORE_LIMIT", str(s.concurrency))
 

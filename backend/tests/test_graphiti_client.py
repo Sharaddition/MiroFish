@@ -479,3 +479,17 @@ def test_the_retry_setting_accepts_zero():
     assert GraphitiSettings.from_env({"GRAPHITI_EPISODE_RETRIES": "0"}).episode_retries == 0
     assert GraphitiSettings.from_env({"GRAPHITI_EPISODE_RETRIES": "3"}).episode_retries == 3
     assert GraphitiSettings.from_env({"GRAPHITI_EPISODE_RETRIES": "many"}).episode_retries == 1
+
+
+def test_graphitis_own_answer_that_echoes_the_schema_layout_is_unwrapped():
+    from pydantic import BaseModel
+
+    class EdgeDuplicate(BaseModel):
+        duplicate_facts: list
+        contradicted_facts: list
+
+    wrapped = {"properties": {"duplicate_facts": [], "contradicted_facts": []}}
+    assert gb.unwrap_layout(wrapped, EdgeDuplicate) == {"duplicate_facts": [], "contradicted_facts": []}
+    fine = {"duplicate_facts": [1], "contradicted_facts": []}
+    assert gb.unwrap_layout(fine, EdgeDuplicate) is fine                    # a correct answer is never touched
+    assert gb.unwrap_layout({"x": {"y": 1}}, EdgeDuplicate) == {"x": {"y": 1}}
