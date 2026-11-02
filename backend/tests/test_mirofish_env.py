@@ -85,3 +85,45 @@ def test_run_settings_and_the_dotenv_text():
     assert build_env(BASE, KEYS, work="/w")["ZEP_GRAPH_MEMORY_UPDATE"] == "false"
     text = to_dotenv({"A": "1", "B": "x y"})
     assert text == "A=1\nB=x y\n"
+
+
+# --- EXTRA_ENV: any other setting, one KEY=VALUE per line --------------------------------------------------------
+
+from mirofish_env import merge_extra_env, parse_extra_env  # noqa: E402
+
+
+def test_extra_env_lines_comments_quotes_and_blank_lines():
+    got = parse_extra_env('''
+        # a comment
+        LLM_MAX_CONCURRENCY=8
+
+        SIM_STOP_GRACE_SECONDS = 600
+        LLM_FALLBACK_MODEL_NAME="some-model"
+        EMPTY=
+    ''')
+    assert got == {"LLM_MAX_CONCURRENCY": "8", "SIM_STOP_GRACE_SECONDS": "600", "LLM_FALLBACK_MODEL_NAME": "some-model", "EMPTY": ""}
+    assert parse_extra_env("") == {} and parse_extra_env(None) == {}
+
+
+def test_a_secret_reference_is_resolved_and_a_missing_one_is_reported():
+    assert parse_extra_env("LLM_FALLBACK_API_KEY=secret:MY_KEY", lambda name: {"MY_KEY": "sk-1"}.get(name, "")) == {"LLM_FALLBACK_API_KEY": "sk-1"}
+    with pytest.raises(ValueError, match="MY_KEY"):
+        parse_extra_env("LLM_FALLBACK_API_KEY=secret:MY_KEY")
+
+
+@pytest.mark.parametrize("bad", ["no equals sign", "1BAD=1", "BAD KEY=1", "=1"])
+def test_a_malformed_line_names_its_line_number(bad):
+    with pytest.raises(ValueError, match="line 2"):
+        parse_extra_env(f"OK=1\n{bad}")
+
+
+def test_extra_lines_win_and_a_shadowed_old_name_is_called_out():
+    env = build_env(BASE, KEYS, work="/w")
+    warnings = merge_extra_env(env, {"LLM_MAX_CONCURRENCY": "8", "GRAPHITI_CONCURRENCY": "2"})
+    assert env["LLM_MAX_CONCURRENCY"] == "8" and env["GRAPHITI_CONCURRENCY"] == "2" and warnings == []     # the user's line wins
+    # LLM_MODEL_NAME is the old name of TWITTER_LLM_MODEL_NAME, which Settings has already set: the backend would ignore it
+    warnings = merge_extra_env(env, {"LLM_MODEL_NAME": "other"})
+    assert len(warnings) == 1 and "TWITTER_LLM_MODEL_NAME" in warnings[0] and "ignored" in warnings[0]
+    # but setting the new name itself is the way to override a Settings value
+    assert merge_extra_env(env, {"TWITTER_LLM_MODEL_NAME": "other"}) == [] and env["TWITTER_LLM_MODEL_NAME"] == "other"
+    assert env_aliases.with_aliases(env)["LLM_MODEL_NAME"] == "other"

@@ -19,7 +19,8 @@ Only the standard library, so it is easy to test.
 
 from __future__ import annotations
 
-from typing import Dict, Mapping
+import re
+from typing import Callable, Dict, List, Mapping
 
 
 def _pick(*values: str) -> str:
@@ -104,6 +105,52 @@ def build_env(
             GRAPHITI_EMBEDDING_DIM=str(settings.get("EMBEDDING_DIM") or 768),
         )
     return {k: v for k, v in env.items() if v != ""}
+
+
+def parse_extra_env(text: str, secret: Callable[[str], str] = lambda name: "") -> Dict[str, str]:
+    """``KEY=VALUE`` lines from the notebook's EXTRA_ENV box. Blank lines and ``# comments`` are skipped.
+
+    A value ``secret:NAME`` is replaced by the Secret ``NAME``, so a key can be used without pasting it into the
+    notebook (which is saved and shared with the text in it).
+    """
+    extra: Dict[str, str] = {}
+    for number, raw in enumerate((text or "").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError(f"EXTRA_ENV line {number}: expected KEY=VALUE, got {raw.strip()[:60]!r}")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if value.startswith("secret:"):
+            name = value[len("secret:"):].strip()
+            value = secret(name)
+            if not value:
+                raise ValueError(f"EXTRA_ENV line {number}: the Secret {name!r} was not found")
+        extra[key] = value
+    return extra
+
+
+def merge_extra_env(env: Dict[str, str], extra: Mapping[str, str]) -> List[str]:
+    """Add ``extra`` to ``env`` (the user's explicit lines win). Returns warnings for lines that will not take effect.
+
+    A line using an OLD name (``LLM_MODEL_NAME``) is ignored by the backend when the new name
+    (``TWITTER_LLM_MODEL_NAME``) is also set, because a new name wins; this says so instead of failing silently.
+    """
+    try:
+        from env_aliases import ALIASES    # backend/env_aliases.py: new name -> old name
+    except ImportError:
+        ALIASES = {}
+    new_for_old = {old: new for new, old in ALIASES.items()}
+    warnings: List[str] = []
+    for key, value in extra.items():
+        shadow = new_for_old.get(key)
+        if shadow and (env.get(shadow) or "").strip() and shadow not in extra:
+            warnings.append(f"{key} is ignored: {shadow} is set (from Settings) and a new name wins; set {shadow} instead")
+        env[key] = value
+    return warnings
 
 
 def to_dotenv(env: Mapping[str, str]) -> str:

@@ -93,6 +93,15 @@ LIVE_GRAPH_UPDATES = False                                   #@param {type:"bool
 # action costs extra model calls and the end of the run waits for them. Leave it off for a first run.
 GRAPHITI_CONCURRENCY = 4                                     #@param {type:"integer"}
 # parallel model calls Graphiti makes; lower it (2) if your provider rate-limits you
+
+# --- any other backend setting, one KEY=VALUE per line (see .env.example). Wins over everything above. -------------------
+# Use NAME=secret:SECRET_NAME to take a key from your Secrets instead of pasting it here.
+EXTRA_ENV = """
+# LLM_MAX_CONCURRENCY=8
+# LLM_FALLBACK_BASE_URL=https://api.example.com/v1
+# LLM_FALLBACK_MODEL_NAME=some-model
+# LLM_FALLBACK_API_KEY=secret:LLM_FALLBACK_API_KEY
+"""
 ''')
 
 md("## 2. Secrets and folders")
@@ -188,12 +197,15 @@ code('''
 # .env for the backend (it reads this file; keys stay on this VM). The mapping from your settings to one model per job
 # lives in notebooks/mirofish_env.py.
 sys.path.insert(0, f"{REPO}/notebooks")
-from mirofish_env import build_env, to_dotenv
+sys.path.insert(0, f"{REPO}/backend")      # for env_aliases (the old/new setting names)
+from mirofish_env import build_env, merge_extra_env, parse_extra_env, to_dotenv
 env = build_env({k: globals().get(k) for k in (
     "TWITTER_LLM_BASE_URL", "TWITTER_LLM_MODEL_NAME", "REDDIT_LLM_BASE_URL", "REDDIT_LLM_MODEL_NAME",
     "MAIN_LLM_BASE_URL", "MAIN_LLM_MODEL_NAME", "GRAPHITI_LLM_BASE_URL", "GRAPHITI_LLM_MODEL_NAME",
     "TWITTER_RERANKER_BASE_URL", "TWITTER_RERANKER_MODEL_NAME", "EMBEDDING", "EMBEDDING_BASE_URL",
     "EMBEDDING_MODEL_NAME", "EMBEDDING_DIM", "LIVE_GRAPH_UPDATES", "GRAPHITI_CONCURRENCY")}, KEYS, work=WORK)
+for warning in merge_extra_env(env, parse_extra_env(EXTRA_ENV, secret)):
+    print("EXTRA_ENV:", warning)
 with open(f"{REPO}/.env", "w") as f:
     f.write(to_dotenv(env))
 print("models:", {k: v for k, v in env.items() if k.endswith("MODEL_NAME")})

@@ -22,6 +22,30 @@ that checks your model, your embedder and Graphiti on one sentence before you sp
 The app talks to either through the same calls: `get_zep_client()` returns a Graphiti-backed object that imitates the
 Zep SDK calls MiroFish makes (`app/utils/graphiti_backend.py`). Zep stays the default and its code path is untouched.
 
+## Starting a run
+
+1. Open the notebook (Colab: the badge at its top; Kaggle: import the `.ipynb`, turn Internet on).
+2. Add your key as a **Secret** (Colab: key icon in the left bar, *Add new secret*, switch on *Notebook access*):
+   `TWITTER_LLM_API_KEY` is the only required one.
+3. Edit the **Settings** cell, then run the cells top to bottom: secrets, install, start services, smoke test, your seed
+   and prompt, then the six pipeline cells, then the save cell. *Run all* also works; it pauses at the upload dialog.
+
+## Setting environment variables
+
+Three layers, from simplest to most general:
+
+| Where | For | Example |
+|---|---|---|
+| **Settings** cell | the model for each job, embeddings, rounds, live graph updates | `MAIN_LLM_MODEL_NAME = "some-model"` |
+| **Secrets** | keys: `<JOB>_API_KEY`, `EMBEDDING_API_KEY`, `TWITTER_RERANKER_API_KEY` | `REDDIT_LLM_API_KEY` |
+| **`EXTRA_ENV`** box (Settings cell) | any other backend setting, one `KEY=VALUE` per line | `LLM_MAX_CONCURRENCY=8` |
+
+`EXTRA_ENV` lines win over the Settings cell. Put keys in Secrets and refer to them with `NAME=secret:SECRET_NAME`
+(for example `LLM_FALLBACK_API_KEY=secret:LLM_FALLBACK_API_KEY`), so the key is never typed into the notebook, which is
+saved and shared with its text. A line with an *old* name (`LLM_MODEL_NAME`) is ignored by the backend when its new name
+(`TWITTER_LLM_MODEL_NAME`) is set from Settings; the cell prints a warning when that happens, so set the new name.
+All the settings the backend reads are listed in `.env.example`.
+
 ## One model per job
 
 The notebook (and `.env`) can give every job its own model, using the names from `backend/env_aliases.py`. Only the
