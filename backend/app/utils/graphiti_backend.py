@@ -70,6 +70,7 @@ class GraphitiSettings:
     embedding_dim: int = 0
     local_embedding_model: str = "BAAI/bge-small-en-v1.5"
     concurrency: int = 4
+    episode_retries: int = 1
     state_dir: str = ""
 
     @classmethod
@@ -93,6 +94,8 @@ class GraphitiSettings:
                 value = 0
             return value if value > 0 else default
 
+        retries = (env.get("GRAPHITI_EPISODE_RETRIES") or "").strip()      # 0 is a valid choice: no retry
+
         return cls(
             db_host=text("GRAPHITI_DB_HOST", "localhost"),
             db_port=number("GRAPHITI_DB_PORT", 6379),
@@ -110,6 +113,7 @@ class GraphitiSettings:
             embedding_dim=number("GRAPHITI_EMBEDDING_DIM", 0),
             local_embedding_model=text("GRAPHITI_LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),
             concurrency=number("GRAPHITI_CONCURRENCY", 4),
+            episode_retries=int(retries) if retries.isdigit() else 1,
             state_dir=text("GRAPHITI_STATE_DIR", os.path.join(Config.UPLOAD_FOLDER, "graphiti"))
             or os.path.join(Config.UPLOAD_FOLDER, "graphiti"),
         )
@@ -174,7 +178,7 @@ def build_graphiti_types(spec: Dict[str, Any]) -> Tuple[dict, dict, dict]:
             field: (Optional[str], Field(default=None, description=description))
             for field, description in (definition.get("fields") or {}).items()
         }
-        return create_model(name, __doc__=definition.get("doc") or name, **fields)
+        return create_model(name, __module__=__name__, __doc__=definition.get("doc") or name, **fields)
 
     entity_types = {name: model(name, d) for name, d in (spec.get("entities") or {}).items()}
     edge_types = {name: model(name, d) for name, d in (spec.get("edges") or {}).items()}
@@ -183,6 +187,59 @@ def build_graphiti_types(spec: Dict[str, Any]) -> Tuple[dict, dict, dict]:
         for source, target in d.get("pairs") or []:
             edge_type_map.setdefault((source, target), []).append(name)
     return entity_types, edge_types, edge_type_map
+
+
+# --------------------------------------------------------------------------------------------------
+# what a real model does to the attribute answers
+# --------------------------------------------------------------------------------------------------
+
+_INTERNAL_MODEL_PREFIX = "graphiti_core"
+
+
+def is_custom_type(model: Any) -> bool:
+    """True for a model that comes from the user's ontology (entity/edge attributes), not one of Graphiti's own."""
+    return not str(getattr(model, "__module__", "")).startswith(_INTERNAL_MODEL_PREFIX)
+
+
+def _as_text(value: Any) -> Optional[str]:
+    """One attribute value as plain text (every ontology attribute is declared as text)."""
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        if all(v is None or isinstance(v, (str, int, float, bool)) for v in value):
+            parts = [_as_text(v) for v in value if v is not None]
+            return ", ".join(parts) if parts else None
+        return json.dumps(value, ensure_ascii=False, default=str)
+    if isinstance(value, dict):
+        if "type" in value and {"description", "title", "anyOf"} & set(value):
+            return None                       # a piece of the schema the model echoed, not an answer
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return str(value)
+
+
+def sanitize_attributes(response: Any, model: Any) -> Any:
+    """The model's answer for an entity's or edge's attributes, reduced to what the ontology declares, as text.
+
+    Graphiti keeps *every* key of this answer (not just the declared fields) and checks only the declared ones, so a
+    model that adds a key of its own, answers with a nested object, or echoes the schema layout sends a value to the
+    database that FalkorDB refuses ("Property values can only be of primitive types or arrays of primitive types"),
+    and a number or list where text is declared fails validation. Here: an answer wrapped in one level
+    (``{"properties": {...}}``) is unwrapped, undeclared keys are dropped, and every value becomes text.
+    """
+    if not isinstance(response, dict):
+        return response
+    fields = set(getattr(model, "model_fields", {}) or {})
+    if not fields:
+        return {}
+    if not fields & set(response):
+        wrapped = [v for v in response.values() if isinstance(v, dict) and fields & set(v)]
+        if len(wrapped) == 1:
+            response = wrapped[0]
+    return {key: _as_text(value) for key, value in response.items() if key in fields}
 
 
 # --------------------------------------------------------------------------------------------------
@@ -273,8 +330,10 @@ class _Batch:
 class GraphitiZepClient:
     """What the app sees as ``Zep``: ``client.graph``, ``client.batch``."""
 
-    def __init__(self, engine: Any, state_dir: str, loop: Optional[_LoopThread] = None) -> None:
+    def __init__(self, engine: Any, state_dir: str, loop: Optional[_LoopThread] = None, episode_retries: int = 1,
+                 retry_delay: float = 3.0) -> None:
         self._engine = engine
+        self._episode_retries, self._retry_delay = max(0, int(episode_retries)), retry_delay
         self._loop = loop or _LoopThread()
         self._state_dir = Path(state_dir)
         self._lock = threading.RLock()
@@ -368,24 +427,33 @@ class GraphitiZepClient:
     ) -> Callable[[], Awaitable[None]]:
         async def job() -> None:
             episode.status = "processing"
-            try:
-                entity_types, edge_types, edge_type_map = build_graphiti_types(self._ontology_spec(episode.graph_id))
-                await self._engine.add_episode(
-                    graph_id=episode.graph_id,
-                    episode_uuid=episode.uuid,
-                    name=name,
-                    body=body,
-                    source_description=source_description,
-                    reference_time=reference_time,
-                    entity_types=entity_types or None,
-                    edge_types=edge_types or None,
-                    edge_type_map=edge_type_map or None,
-                )
-                episode.status = "processed"
-            except Exception as error:  # noqa: BLE001 - recorded, surfaced by episode.get
-                episode.status = "failed"
-                episode.error = f"{type(error).__name__}: {error}"[:500]
-                logger.error(f"Graphiti episode {episode.uuid} failed: {episode.error}")
+            # A model's answer differs from one call to the next, so a chunk that failed once often works the second
+            # time; one lost chunk should not cost the whole graph build.
+            for attempt in range(self._episode_retries + 1):
+                try:
+                    entity_types, edge_types, edge_type_map = build_graphiti_types(self._ontology_spec(episode.graph_id))
+                    await self._engine.add_episode(
+                        graph_id=episode.graph_id,
+                        episode_uuid=episode.uuid,
+                        name=name,
+                        body=body,
+                        source_description=source_description,
+                        reference_time=reference_time,
+                        entity_types=entity_types or None,
+                        edge_types=edge_types or None,
+                        edge_type_map=edge_type_map or None,
+                    )
+                    episode.status, episode.error = "processed", None
+                    break
+                except Exception as error:  # noqa: BLE001 - recorded, surfaced by episode.get
+                    episode.status = "failed"
+                    episode.error = f"{type(error).__name__}: {error}"[:500]
+                    if attempt < self._episode_retries:
+                        logger.warning(f"Graphiti episode {episode.uuid} failed ({episode.error}); retrying")
+                        episode.status = "processing"
+                        await asyncio.sleep(self._retry_delay)
+                    else:
+                        logger.error(f"Graphiti episode {episode.uuid} failed: {episode.error}")
             if on_done is not None:
                 on_done(episode)
 
@@ -688,7 +756,16 @@ class GraphitiEngine:
         from graphiti_core.cross_encoder.client import CrossEncoderClient
         from graphiti_core.driver.falkordb_driver import FalkorDriver
         from graphiti_core.llm_client.config import LLMConfig
-        from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+        from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient as _GenericClient
+
+        class OpenAIGenericClient(_GenericClient):
+            """Graphiti's OpenAI-compatible client, with the attribute answers made safe to store (see sanitize_attributes)."""
+
+            async def generate_response(self, messages, response_model=None, *args, **kwargs):
+                result = await super().generate_response(messages, response_model, *args, **kwargs)
+                if response_model is not None and is_custom_type(response_model):
+                    return sanitize_attributes(result, response_model)
+                return result
 
         os.environ.setdefault("SEMAPHORE_LIMIT", str(s.concurrency))
 
@@ -852,7 +929,7 @@ def get_graphiti_client() -> GraphitiZepClient:
             loop = _LoopThread()
             engine = GraphitiEngine(settings)
             loop.run(engine.start(), 300)
-            _client = GraphitiZepClient(engine, settings.state_dir, loop)
+            _client = GraphitiZepClient(engine, settings.state_dir, loop, episode_retries=settings.episode_retries)
             logger.info(
                 f"Graphiti backend ready: db={settings.db_host}:{settings.db_port} llm={settings.llm_model} "
                 f"embedder={'api:' + settings.embedding_model if settings.embedding_base_url else 'local:' + settings.local_embedding_model}"

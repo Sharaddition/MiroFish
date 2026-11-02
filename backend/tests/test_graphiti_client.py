@@ -413,3 +413,69 @@ def test_calls_from_many_threads_share_one_event_loop(make_client):
     [t.join() for t in threads]
     assert not errors and len(set(uuids)) == 30
     assert wait_for(lambda: all(client.graph.episode.get(uuid_=u).processed for u in uuids))
+
+
+# --- what a real model does to the attribute answers ------------------------------------------------------------------
+
+def attribute_model(*names):
+    return gb.build_graphiti_types({"entities": {"Company": {"doc": "A company.", "fields": {n: "" for n in names}}}})[0]["Company"]
+
+
+def test_a_nested_extra_key_is_dropped_so_the_database_never_sees_it():
+    # the production failure: "Property values can only be of primitive types or arrays of primitive types"
+    model = attribute_model("ticker", "sector")
+    answer = {"ticker": "PSYS", "sector": "IT", "notes": {"source": {"line": 3, "tags": ["a"]}}, "confidence": 0.9}
+    assert gb.sanitize_attributes(answer, model) == {"ticker": "PSYS", "sector": "IT"}
+
+
+def test_an_answer_that_echoes_the_schema_layout_is_unwrapped():
+    model = attribute_model("ticker")
+    assert gb.sanitize_attributes({"title": "Attributes", "type": "object", "properties": {"ticker": "PSYS"}}, model) == {"ticker": "PSYS"}
+    # ... and a piece of the schema itself is not an answer
+    assert gb.sanitize_attributes({"ticker": {"type": "string", "description": "Ticker"}}, model) == {"ticker": None}
+
+
+def test_numbers_lists_and_objects_become_text_because_every_attribute_is_declared_as_text():
+    model = attribute_model("a", "b", "c", "d", "e", "f")
+    got = gb.sanitize_attributes({"a": 42, "b": 1.5, "c": True, "d": ["x", "y", 3], "e": [{"k": "v"}], "f": {"k": [1, 2]}}, model)
+    assert got == {"a": "42", "b": "1.5", "c": "true", "d": "x, y, 3", "e": '[{"k": "v"}]', "f": '{"k": [1, 2]}'}
+    assert gb.sanitize_attributes({"a": None, "b": []}, model) == {"a": None, "b": None}
+
+
+def test_only_the_users_own_models_are_sanitised_not_graphitis():
+    assert gb.is_custom_type(attribute_model("ticker")) is True
+    internal = type("ExtractedEntities", (), {"__module__": "graphiti_core.prompts.extract_nodes"})
+    assert gb.is_custom_type(internal) is False
+    assert gb.sanitize_attributes("not a dict", attribute_model("ticker")) == "not a dict"          # left for Graphiti to reject
+    assert gb.sanitize_attributes({"x": 1}, type("NoFields", (), {"model_fields": {}})) == {}
+
+
+def test_a_chunk_that_fails_once_is_retried_and_a_chunk_that_keeps_failing_is_reported(tmp_path):
+    class Flaky(FakeEngine):
+        def __init__(self, failures):
+            super().__init__()
+            self.failures_left = failures
+
+        async def add_episode(self, **kwargs):
+            if self.failures_left:
+                self.failures_left -= 1
+                raise ValueError("Property values can only be of primitive types")
+            await super().add_episode(**kwargs)
+
+    for failures, retries, expected in [(1, 1, "processed"), (2, 1, "failed"), (1, 0, "failed"), (2, 2, "processed")]:
+        engine = Flaky(failures)
+        client = GraphitiZepClient(engine, str(tmp_path / f"s{failures}{retries}"), episode_retries=retries, retry_delay=0.01)
+        client.graph.create(graph_id="g")
+        episode = client.graph.add(graph_id="g", type="text", data="chunk")
+        assert wait_for(lambda: client._episodes[episode.uuid_].status in ("processed", "failed")), (failures, retries)
+        assert client._episodes[episode.uuid_].status == expected, (failures, retries)
+        if expected == "failed":
+            with pytest.raises(RuntimeError, match="primitive"):
+                client.graph.episode.get(uuid_=episode.uuid_)
+
+
+def test_the_retry_setting_accepts_zero():
+    assert GraphitiSettings.from_env({}).episode_retries == 1
+    assert GraphitiSettings.from_env({"GRAPHITI_EPISODE_RETRIES": "0"}).episode_retries == 0
+    assert GraphitiSettings.from_env({"GRAPHITI_EPISODE_RETRIES": "3"}).episode_retries == 3
+    assert GraphitiSettings.from_env({"GRAPHITI_EPISODE_RETRIES": "many"}).episode_retries == 1
