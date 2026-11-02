@@ -50,7 +50,10 @@ class Config:
         return {"api_key": cls.LLM_API_KEY, "base_url": cls.LLM_BASE_URL, "model_name": cls.LLM_MODEL_NAME}
 
     # Zep配置
-    ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
+    # 'zep' (Zep Cloud, the default) or 'graphiti' (self-hosted Graphiti + FalkorDB; see app/utils/graphiti_backend.py)
+    GRAPH_BACKEND = (os.environ.get('GRAPH_BACKEND') or 'zep').strip().lower()
+    # With Graphiti there is no Zep account; a placeholder keeps the many "is Zep configured" checks satisfied
+    ZEP_API_KEY = os.environ.get('ZEP_API_KEY') or ('graphiti-local' if GRAPH_BACKEND == 'graphiti' else None)
     
     # 文件上传配置
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB

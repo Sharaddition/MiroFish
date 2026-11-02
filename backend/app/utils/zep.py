@@ -75,6 +75,12 @@ def _cached_zep_client(api_key: str, timeout: float) -> Zep:
 def get_zep_client(api_key: str | None = None, timeout: float | None = None) -> Zep:
     """Return a process-shared, explicitly configured Zep Cloud client."""
 
+    if Config.GRAPH_BACKEND == "graphiti":
+        # Self-hosted Graphiti + FalkorDB behind the same SDK calls (no Zep account or key involved)
+        from .graphiti_backend import get_graphiti_client
+
+        return get_graphiti_client()
+
     # zep-cloud gives ZEP_API_URL precedence even when base_url is explicit.
     # Reject it so this Cloud-only integration cannot silently target a
     # self-hosted or compatibility endpoint.
@@ -97,6 +103,10 @@ def clear_zep_client_cache() -> None:
     """Clear cached clients. Intended for tests and controlled reconfiguration."""
 
     _cached_zep_client.cache_clear()
+    if Config.GRAPH_BACKEND == "graphiti":
+        from .graphiti_backend import reset_graphiti_client
+
+        reset_graphiti_client()
 
 
 def is_retryable_zep_error(error: BaseException) -> bool:
