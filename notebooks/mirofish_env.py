@@ -2,9 +2,10 @@
 
 The jobs and the names (the backend also still reads the old names, see backend/env_aliases.py):
 
-    TWITTER_LLM_*       Twitter agents, the end-of-run poll, the ontology and the outcome questions   (was LLM_*)
+    TWITTER_LLM_*       Twitter agents and the end-of-run poll                                       (was LLM_*)
     REDDIT_LLM_*        Reddit agents                                                                (was LLM_BOOST_*)
-    MAIN_LLM_*          agent personas, the simulation config, the report and its tools              (was LLM_PREP_*)
+    MAIN_LLM_*          the ontology, agent personas, the simulation config, the outcome questions,
+                        the report and its tools                                                     (was LLM_PREP_*)
     GRAPHITI_LLM_*      reading the seed into the knowledge graph (Graphiti)                         (new)
     TWITTER_RERANKER_*  the hosted twhin-bert behind the Twitter feed; blank = run it on this VM     (was LLM_EMBEDDING_*)
     GRAPHITI_EMBEDDING_*  embeddings for graph search; blank = a small local model                   (new)

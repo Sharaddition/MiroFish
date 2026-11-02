@@ -29,9 +29,9 @@ Twitter model is required; a job left blank follows another one.
 
 | Job | Names | What it runs | Blank means |
 |---|---|---|---|
-| Twitter model | `TWITTER_LLM_*` (was `LLM_*`) | Twitter agents, the end-of-run poll, the ontology, the outcome questions | required |
+| Twitter model | `TWITTER_LLM_*` (was `LLM_*`) | Twitter agents and the end-of-run poll | required |
 | Reddit model | `REDDIT_LLM_*` (was `LLM_BOOST_*`) | Reddit agents | same as Twitter |
-| Main model | `MAIN_LLM_*` (was `LLM_PREP_*`) | agent personas, the simulation config, the report and its search tools | same as Twitter |
+| Main model | `MAIN_LLM_*` (was `LLM_PREP_*`) | the ontology, agent personas, the simulation config, the outcome questions, the report and its search tools | same as Twitter |
 | Graph model | `GRAPHITI_LLM_*` | reading the seed into the knowledge graph | same as Main |
 | Feed ranker | `TWITTER_RERANKER_*` (was `LLM_EMBEDDING_*`) | the hosted twhin-bert behind the Twitter feed | runs on the VM |
 | Graph embeddings | `GRAPHITI_EMBEDDING_*` | graph search | a small local model |

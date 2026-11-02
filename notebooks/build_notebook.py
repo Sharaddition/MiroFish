@@ -41,9 +41,9 @@ model and split them later (each job can also have its own key, as a Secret name
 
 | Job | Settings prefix | What it runs | Blank means |
 |---|---|---|---|
-| Twitter model | `TWITTER_LLM_` | Twitter agents, the end-of-run poll, the ontology, the outcome questions | (required) |
+| Twitter model | `TWITTER_LLM_` | Twitter agents and the end-of-run poll | (required) |
 | Reddit model | `REDDIT_LLM_` | Reddit agents | same as Twitter |
-| Main model | `MAIN_LLM_` | agent personas, the simulation config, the report and its search tools | same as Twitter |
+| Main model | `MAIN_LLM_` | the ontology, agent personas, the simulation config, the outcome questions, the report and its search tools | same as Twitter |
 | Graph model | `GRAPHITI_LLM_` | reading your seed into the knowledge graph | same as Main |
 | Feed ranker | `TWITTER_RERANKER_` | the hosted twhin-bert that ranks the Twitter feed | runs on this VM |
 | Graph embeddings | `EMBEDDING_` | graph search | a small local model |
