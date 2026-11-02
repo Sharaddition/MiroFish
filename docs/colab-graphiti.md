@@ -70,6 +70,13 @@ All `GRAPHITI_*` settings are in `.env.example`. The notebook writes them for yo
 
 - **Python 3.12.** Colab's default Python is 3.13; the backend needs 3.11 or 3.12, so the notebook builds its own
   environment with `uv`.
+- **CPU-only PyTorch.** The default PyTorch wheel also installs about 5 GB of NVIDIA GPU libraries that a CPU runtime
+  never uses. The notebook installs the CPU build first: 1.4 GB on disk instead of 7.3 GB, and about 15 seconds instead
+  of about a minute. Nothing in the pipeline computes on a GPU.
+- **Downloads that remain.** The packages (1.4 GB), the small local embedding model for graph search (about 130 MB), and
+  the twhin-bert model (1.1 GB) that ranks the Twitter feed. That one is fetched only when the feed first needs
+  ranking, i.e. once there are more posts than an agent is shown, so a short test run never downloads it and a real run
+  does. Set `TWITTER_RERANKER_BASE_URL` to use the hosted ranker and skip it.
 - **Pinned versions.** A fresh install picks the newest of everything and breaks (`mcp` 2 no longer has the `FastMCP`
   that `camel-ai` imports). `constraints-linux.txt` holds the versions the backend is tested with. `certifi` and `neo4j`
   are left unpinned on purpose: `graphiti-core` needs newer ones.

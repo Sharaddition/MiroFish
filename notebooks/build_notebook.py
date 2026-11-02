@@ -48,7 +48,7 @@ model and split them later (each job can also have its own key, as a Secret name
 | Feed ranker | `TWITTER_RERANKER_` | the hosted twhin-bert that ranks the Twitter feed | runs on this VM |
 | Graph embeddings | `EMBEDDING_` | graph search | a small local model |
 
-**How long it takes** (free CPU runtime, 12 GB RAM): install about 6 minutes; graph from a 5-page seed 5 to 30 minutes
+**How long it takes** (free CPU runtime, 12 GB RAM): install about 2 minutes; graph from a 5-page seed 5 to 30 minutes
 depending on the model's speed; persona generation about 2 minutes per 10 agents; the simulation 30 to 90 minutes for 24
 rounds; the report 5 to 15 minutes. Keep the browser tab open: free sessions stop when idle.
 
@@ -138,7 +138,7 @@ GITHUB_TOKEN = secret("GITHUB_TOKEN")   # only needed if the repository is priva
 print("platform:", "Kaggle" if ON_KAGGLE else "Colab / other", "| work folder:", WORK, "| python:", sys.version.split()[0])
 ''')
 
-md("## 3. Get the code and install (about 6 minutes)")
+md("## 3. Get the code and install (about 2 minutes)")
 code('''
 def run(cmd, cwd=None, quiet=False, timeout=3600):
     """Run a shell command, stream its output, raise with the tail of the output if it fails."""
@@ -166,6 +166,13 @@ print("code ready:", os.path.exists(f"{REPO}/backend/run.py"))
 run("pip -q install uv", quiet=True)
 run(f"uv venv --clear --python 3.12 {VENV}", quiet=True)
 PIP = f"uv pip install --python {VENV}/bin/python -c {REPO}/backend/constraints-linux.txt"
+# CPU-only PyTorch first. The default wheel also installs about 5 GB of GPU libraries (nvidia-*, triton) that a CPU
+# runtime never uses; this brings the environment from 7.3 GB to 1.4 GB. Nothing here computes on a GPU.
+try:
+    run(f"uv pip install --python {VENV}/bin/python --extra-index-url https://download.pytorch.org/whl/cpu "
+        f"--index-strategy unsafe-best-match 'torch==2.9.1+cpu'", quiet=True)
+except RuntimeError as error:
+    print("CPU-only PyTorch could not be fetched; using the default wheel (a much larger download):", str(error)[-200:])
 run(f"{PIP} -r {REPO}/backend/requirements.txt", quiet=True)
 run(f"{PIP} 'graphiti-core[falkordb]==0.31.2' falkordblite", quiet=True)
 run(f"{VENV}/bin/python -c \\"import oasis, graphiti_core, redislite, flask; print('install ok')\\"")
