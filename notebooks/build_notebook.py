@@ -31,10 +31,22 @@ over the network.
 [![Open in Colab]({"https://colab.research.google.com/assets/colab-badge.svg"})]({OPEN_IN_COLAB})
 
 **You need**
-1. An API key for an OpenAI-compatible language model. Add it as a **Secret** named `LLM_API_KEY`
+1. An API key for an OpenAI-compatible language model. Add it as a **Secret** named `TWITTER_LLM_API_KEY` (or `LLM_API_KEY`)
    (Colab: the key icon in the left bar, switch on *Notebook access*. Kaggle: *Add-ons → Secrets*, and switch **Internet on**).
-2. A model that follows JSON instructions well. The graph step asks it for structured output many times; a weak or
-   rate-limited free model is the most common reason for a poor or slow graph. Step 4 tests yours first.
+2. A model that follows JSON instructions well for reading your seed. The graph step asks it for structured output many
+   times; a weak or rate-limited free model is the most common reason for a poor or slow graph. Step 4 tests yours first.
+
+**One model per job.** Only the first model is required; a job left blank follows another, so you can start with one
+model and split them later (each job can also have its own key, as a Secret named `<JOB>_API_KEY`).
+
+| Job | Settings prefix | What it runs | Blank means |
+|---|---|---|---|
+| Twitter model | `TWITTER_LLM_` | Twitter agents, the end-of-run poll, the ontology, the outcome questions | (required) |
+| Reddit model | `REDDIT_LLM_` | Reddit agents | same as Twitter |
+| Main model | `MAIN_LLM_` | agent personas, the simulation config, the report and its search tools | same as Twitter |
+| Graph model | `GRAPHITI_LLM_` | reading your seed into the knowledge graph | same as Main |
+| Feed ranker | `TWITTER_RERANKER_` | the hosted twhin-bert that ranks the Twitter feed | runs on this VM |
+| Graph embeddings | `EMBEDDING_` | graph search | a small local model |
 
 **How long it takes** (free CPU runtime, 12 GB RAM): install about 6 minutes; graph from a 5-page seed 5 to 30 minutes
 depending on the model's speed; persona generation about 2 minutes per 10 agents; the simulation 30 to 90 minutes for 24
@@ -50,19 +62,29 @@ code('''
 REPO_URL = "https://github.com/Sharaddition/MiroFish.git"  #@param {type:"string"}
 BRANCH = "feat/graphiti-colab-notebook"                      #@param {type:"string"}
 
-# --- the language model for agents, personas, config and the report (any OpenAI-compatible API) -----------------------
-LLM_BASE_URL = "https://openrouter.ai/api/v1"               #@param {type:"string"}
-LLM_MODEL_NAME = "google/gemini-2.0-flash-001"              #@param {type:"string"}
+# --- one model per job. Only the Twitter model is required; a blank job follows another (see the table above). --------
+TWITTER_LLM_BASE_URL = "https://openrouter.ai/api/v1"        #@param {type:"string"}
+TWITTER_LLM_MODEL_NAME = "google/gemini-2.0-flash-001"       #@param {type:"string"}
 
-# --- the model Graphiti uses to read the seed (blank = same as above). It must follow JSON instructions reliably. -------
-GRAPHITI_LLM_BASE_URL = ""                                   #@param {type:"string"}
-GRAPHITI_LLM_MODEL_NAME = ""                                 #@param {type:"string"}
+REDDIT_LLM_BASE_URL = ""                                      #@param {type:"string"}
+REDDIT_LLM_MODEL_NAME = ""                                    #@param {type:"string"}
+
+MAIN_LLM_BASE_URL = ""                                        #@param {type:"string"}
+MAIN_LLM_MODEL_NAME = ""                                      #@param {type:"string"}
+
+# The graph model reads your seed into the knowledge graph. It must follow JSON instructions reliably.
+GRAPHITI_LLM_BASE_URL = ""                                    #@param {type:"string"}
+GRAPHITI_LLM_MODEL_NAME = ""                                  #@param {type:"string"}
+
+# The hosted twhin-bert behind the Twitter feed (blank = run it on this VM, which is slower but needs nothing).
+TWITTER_RERANKER_BASE_URL = ""                                #@param {type:"string"}
+TWITTER_RERANKER_MODEL_NAME = ""                              #@param {type:"string"}
 
 # --- embeddings for graph search: "local" runs a small model on this VM (nothing to configure); "api" uses a service ----
-EMBEDDING = "local"                                          #@param ["local", "api"]
-EMBEDDING_BASE_URL = ""                                      #@param {type:"string"}
-EMBEDDING_MODEL_NAME = ""                                    #@param {type:"string"}
-EMBEDDING_DIM = 768                                          #@param {type:"integer"}
+EMBEDDING = "local"                                           #@param ["local", "api"]
+EMBEDDING_BASE_URL = ""                                       #@param {type:"string"}
+EMBEDDING_MODEL_NAME = ""                                     #@param {type:"string"}
+EMBEDDING_DIM = 768                                           #@param {type:"integer"}
 
 # --- the run ------------------------------------------------------------------------------------------------------------
 MAX_ROUNDS = 24                                              #@param {type:"integer"}
@@ -103,9 +125,15 @@ def secret(name, required=False):
         return getpass.getpass(f"{name} (not found in Secrets; paste it, it is not saved): ")
     return ""
 
-LLM_API_KEY = secret("LLM_API_KEY", required=True)
-GRAPHITI_LLM_API_KEY = secret("GRAPHITI_LLM_API_KEY") or LLM_API_KEY
-EMBEDDING_API_KEY = secret("EMBEDDING_API_KEY") if EMBEDDING == "api" else ""
+# Keys, by job. Only the Twitter key is needed; a job without its own key uses the one of the job it follows.
+KEYS = {
+    "TWITTER_LLM_API_KEY": secret("TWITTER_LLM_API_KEY") or secret("LLM_API_KEY", required=True),
+    "REDDIT_LLM_API_KEY": secret("REDDIT_LLM_API_KEY"),
+    "MAIN_LLM_API_KEY": secret("MAIN_LLM_API_KEY"),
+    "GRAPHITI_LLM_API_KEY": secret("GRAPHITI_LLM_API_KEY"),
+    "TWITTER_RERANKER_API_KEY": secret("TWITTER_RERANKER_API_KEY") if TWITTER_RERANKER_BASE_URL else "",
+    "EMBEDDING_API_KEY": secret("EMBEDDING_API_KEY") if EMBEDDING == "api" else "",
+}
 GITHUB_TOKEN = secret("GITHUB_TOKEN")   # only needed if the repository is private
 print("platform:", "Kaggle" if ON_KAGGLE else "Colab / other", "| work folder:", WORK, "| python:", sys.version.split()[0])
 ''')
@@ -150,24 +178,18 @@ The smoke test creates a tiny graph with **your** model and embedder, extracts o
 takes a minute and tells you what to change if anything is wrong, before you spend an hour on a full run.
 """)
 code('''
-# .env for the backend (it reads this file; keys stay on this VM)
-env = {
-    "GRAPH_BACKEND": "graphiti",
-    "ZEP_GRAPH_MEMORY_UPDATE": "true" if LIVE_GRAPH_UPDATES else "false",
-    "LLM_API_KEY": LLM_API_KEY, "LLM_BASE_URL": LLM_BASE_URL, "LLM_MODEL_NAME": LLM_MODEL_NAME,
-    "GRAPHITI_DB_PORT": "6390", "GRAPHITI_CONCURRENCY": str(GRAPHITI_CONCURRENCY),
-    "GRAPHITI_STATE_DIR": f"{WORK}/graphiti_state",
-    "GRAPHITI_LLM_API_KEY": GRAPHITI_LLM_API_KEY,
-    "GRAPHITI_LLM_BASE_URL": GRAPHITI_LLM_BASE_URL or LLM_BASE_URL,
-    "GRAPHITI_LLM_MODEL_NAME": GRAPHITI_LLM_MODEL_NAME or LLM_MODEL_NAME,
-    "FLASK_PORT": "5001", "FLASK_HOST": "127.0.0.1",
-    "LLM_MODEL_TIMEOUT": "180", "LLM_MODEL_MAX_RETRIES": "1",
-}
-if EMBEDDING == "api":
-    env.update(GRAPHITI_EMBEDDING_BASE_URL=EMBEDDING_BASE_URL, GRAPHITI_EMBEDDING_MODEL_NAME=EMBEDDING_MODEL_NAME,
-               GRAPHITI_EMBEDDING_API_KEY=EMBEDDING_API_KEY, GRAPHITI_EMBEDDING_DIM=str(EMBEDDING_DIM))
+# .env for the backend (it reads this file; keys stay on this VM). The mapping from your settings to one model per job
+# lives in notebooks/mirofish_env.py.
+sys.path.insert(0, f"{REPO}/notebooks")
+from mirofish_env import build_env, to_dotenv
+env = build_env({k: globals().get(k) for k in (
+    "TWITTER_LLM_BASE_URL", "TWITTER_LLM_MODEL_NAME", "REDDIT_LLM_BASE_URL", "REDDIT_LLM_MODEL_NAME",
+    "MAIN_LLM_BASE_URL", "MAIN_LLM_MODEL_NAME", "GRAPHITI_LLM_BASE_URL", "GRAPHITI_LLM_MODEL_NAME",
+    "TWITTER_RERANKER_BASE_URL", "TWITTER_RERANKER_MODEL_NAME", "EMBEDDING", "EMBEDDING_BASE_URL",
+    "EMBEDDING_MODEL_NAME", "EMBEDDING_DIM", "LIVE_GRAPH_UPDATES", "GRAPHITI_CONCURRENCY")}, KEYS, work=WORK)
 with open(f"{REPO}/.env", "w") as f:
-    f.write("\\n".join(f"{k}={v}" for k, v in env.items() if v != "") + "\\n")
+    f.write(to_dotenv(env))
+print("models:", {k: v for k, v in env.items() if k.endswith("MODEL_NAME")})
 
 def start(name, cmd, cwd):
     log = open(f"{LOGS}/{name}.log", "w")
@@ -186,7 +208,6 @@ SERVICES = [
 time.sleep(4)
 SERVICES.append(start("backend", f"{VENV}/bin/python {REPO}/backend/run.py", f"{REPO}/backend"))
 
-sys.path.insert(0, f"{REPO}/notebooks")
 from mirofish_driver import MiroFish
 mf = MiroFish("http://127.0.0.1:5001")
 mf.wait_for_backend(180)
@@ -286,7 +307,7 @@ md("""
 | What you see | Cause and fix |
 |---|---|
 | Step 3 fails in `pip`/`uv` | Internet is off (Kaggle: Settings → Internet on). Re-run the cell. |
-| Smoke test `[FAIL] ... 401` | The key in Secrets is wrong or not shared with this notebook. |
+| Smoke test `[FAIL] ... 401` | The key in Secrets is wrong or not shared with this notebook (`TWITTER_LLM_API_KEY`, or the job's own `<JOB>_API_KEY`). |
 | Smoke test `[FAIL] ... json` | The model cannot give structured output. Set `GRAPHITI_LLM_MODEL_NAME` to a stronger model. |
 | Graph step is very slow or stalls | Rate limits. Lower `GRAPHITI_CONCURRENCY` to 2, or use a faster model for Graphiti. |
 | `6b` finishes but the graph is nearly empty | The model returned no entities: use a stronger `GRAPHITI_LLM_MODEL_NAME`. |

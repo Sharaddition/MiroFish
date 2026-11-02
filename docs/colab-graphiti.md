@@ -22,6 +22,25 @@ that checks your model, your embedder and Graphiti on one sentence before you sp
 The app talks to either through the same calls: `get_zep_client()` returns a Graphiti-backed object that imitates the
 Zep SDK calls MiroFish makes (`app/utils/graphiti_backend.py`). Zep stays the default and its code path is untouched.
 
+## One model per job
+
+The notebook (and `.env`) can give every job its own model, using the names from `backend/env_aliases.py`. Only the
+Twitter model is required; a job left blank follows another one.
+
+| Job | Names | What it runs | Blank means |
+|---|---|---|---|
+| Twitter model | `TWITTER_LLM_*` (was `LLM_*`) | Twitter agents, the end-of-run poll, the ontology, the outcome questions | required |
+| Reddit model | `REDDIT_LLM_*` (was `LLM_BOOST_*`) | Reddit agents | same as Twitter |
+| Main model | `MAIN_LLM_*` (was `LLM_PREP_*`) | agent personas, the simulation config, the report and its search tools | same as Twitter |
+| Graph model | `GRAPHITI_LLM_*` | reading the seed into the knowledge graph | same as Main |
+| Feed ranker | `TWITTER_RERANKER_*` (was `LLM_EMBEDDING_*`) | the hosted twhin-bert behind the Twitter feed | runs on the VM |
+| Graph embeddings | `GRAPHITI_EMBEDDING_*` | graph search | a small local model |
+
+Each job takes `API_KEY`, `BASE_URL` and `MODEL_NAME`; in the notebook the keys are Secrets named `<JOB>_API_KEY`.
+The backend only starts a separate Reddit or Main model when it has both a key and a model, so the notebook fills in
+the key and base URL from the job being followed (`notebooks/mirofish_env.py`, tested). Old `.env` names keep working
+and a new name wins when both are set.
+
 ## Choosing the model
 
 Graphiti asks the model for structured JSON many times per chunk (entities, facts, duplicates, summaries). A weak or

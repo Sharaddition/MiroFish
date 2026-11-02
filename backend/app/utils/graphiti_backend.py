@@ -77,6 +77,11 @@ class GraphitiSettings:
         env = os.environ if env is None else env
         from ..config import Config
 
+        # Reading the seed needs the most reliable JSON model, so by default Graphiti follows the MAIN model (the one
+        # that prepares the simulation and writes the report; MAIN_LLM_* / LLM_PREP_*), which is the main LLM_* model
+        # when no separate one is set.
+        prep = Config.prep_llm()
+
         def text(name: str, default: Optional[str] = None) -> Optional[str]:
             value = (env.get(name) or "").strip()
             return value or default
@@ -93,9 +98,9 @@ class GraphitiSettings:
             db_port=number("GRAPHITI_DB_PORT", 6379),
             db_username=text("GRAPHITI_DB_USERNAME"),
             db_password=text("GRAPHITI_DB_PASSWORD"),
-            llm_api_key=text("GRAPHITI_LLM_API_KEY", Config.LLM_API_KEY or "") or "",
-            llm_base_url=text("GRAPHITI_LLM_BASE_URL", Config.LLM_BASE_URL),
-            llm_model=text("GRAPHITI_LLM_MODEL_NAME", Config.LLM_MODEL_NAME or "") or "",
+            llm_api_key=text("GRAPHITI_LLM_API_KEY", prep["api_key"] or "") or "",
+            llm_base_url=text("GRAPHITI_LLM_BASE_URL", prep["base_url"]),
+            llm_model=text("GRAPHITI_LLM_MODEL_NAME", prep["model_name"] or "") or "",
             llm_small_model=text("GRAPHITI_LLM_SMALL_MODEL_NAME"),
             structured_output_mode=text("GRAPHITI_STRUCTURED_OUTPUT", "json_object") or "json_object",
             llm_max_tokens=number("GRAPHITI_LLM_MAX_TOKENS", 8192),

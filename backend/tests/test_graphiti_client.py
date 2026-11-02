@@ -377,6 +377,24 @@ def test_settings_default_to_the_apps_llm_and_a_local_embedder():
     assert (s.db_port, s.llm_model, s.embedding_base_url, s.embedding_dim, s.concurrency) == (6390, "m", "https://e/v1", 768, 4)
 
 
+def test_graphiti_follows_the_main_model_then_the_twitter_model(monkeypatch):
+    from app.config import Config
+
+    for name, value in dict(LLM_API_KEY="tk", LLM_BASE_URL="https://t/v1", LLM_MODEL_NAME="twitter-model",
+                            LLM_PREP_API_KEY=None, LLM_PREP_BASE_URL=None, LLM_PREP_MODEL_NAME=None).items():
+        monkeypatch.setattr(Config, name, value)
+    s = GraphitiSettings.from_env({})
+    assert (s.llm_model, s.llm_base_url, s.llm_api_key) == ("twitter-model", "https://t/v1", "tk")      # no MAIN model: Twitter's
+
+    monkeypatch.setattr(Config, "LLM_PREP_API_KEY", "mk")
+    monkeypatch.setattr(Config, "LLM_PREP_MODEL_NAME", "main-model")
+    s = GraphitiSettings.from_env({})
+    assert (s.llm_model, s.llm_base_url, s.llm_api_key) == ("main-model", "https://t/v1", "mk")          # MAIN's own base falls back to Twitter's
+
+    s = GraphitiSettings.from_env({"GRAPHITI_LLM_MODEL_NAME": "extractor"})
+    assert s.llm_model == "extractor"                                                                      # an explicit Graphiti model wins
+
+
 def test_calls_from_many_threads_share_one_event_loop(make_client):
     client, _ = make_client(FakeEngine(delay=0.005))
     client.graph.create(graph_id="g1")
