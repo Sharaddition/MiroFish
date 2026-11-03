@@ -70,7 +70,24 @@ and a new name wins when both are set.
 Graphiti asks the model for structured JSON many times per chunk (entities, facts, duplicates, summaries). A weak or
 heavily rate-limited model gives an empty or poor graph, or takes hours. If the smoke test or the graph step struggles,
 set `GRAPHITI_LLM_MODEL_NAME` to a stronger model while keeping a cheaper one for the agents. `GRAPHITI_CONCURRENCY`
-(default 4) is how many model calls Graphiti makes at once; lower it on a free tier.
+(default 4) is how many model calls Graphiti makes at once inside one chunk; lower it on a free tier.
+`GRAPHITI_EPISODE_WORKERS` (default 1; the notebook sets 4) is how many chunks of the seed are read at the same time. Chunks
+are otherwise read one after another, which is slow because each chunk is a chain of dependent model calls. Reading
+several together is several times faster, but chunks read together cannot see each other's entities yet, so the same
+entity may appear twice (for example "Persistent Systems" and "Persistent"). Keep it within what your provider allows.
+
+`GRAPHITI_DEDUPE` cleans that up once the build finishes, before the graph step is reported complete:
+
+| Value | What it does |
+|---|---|
+| `off` | Keeps the graph as built. |
+| `exact` (default) | Merges entities with the same name (ignoring case and punctuation) and the same type. No model calls. |
+| `llm` | Also looks for near-duplicates among the entity names: names that contain each other ("Persistent" inside "Persistent Systems") and names whose embeddings are close ("Infosys Ltd" / "Infosys Limited"). A pair scoring at least `GRAPHITI_DEDUPE_AUTO_SCORE` (default 0.97) is merged without asking; a pair between `GRAPHITI_DEDUPE_ASK_SCORE` (default 0.85) and that is put to the Graphiti model, one call per pair, and only a clear yes merges; anything lower is left alone. `GRAPHITI_DEDUPE_MAX_CALLS` (default 50) caps the model calls. |
+
+Entities are only compared within one type, except that an entity Graphiti left untyped joins the typed one of the same
+name (when there is just one). Merging moves every fact and episode link onto the surviving entity, deletes the others and drops facts that are now
+exact repeats. Every merge is written to the backend log. A cleanup that fails is logged and skipped: the graph is kept
+as built. Acronyms ("SEBI" / "Securities and Exchange Board of India") share no words, so they are not found.
 
 `GRAPHITI_STRUCTURED_OUTPUT=json_object` (the default) works with far more providers than OpenAI's strict
 `json_schema` mode.

@@ -67,6 +67,8 @@ def build_env(
         "TWITTER_LLM_MODEL_NAME": twitter["model"],
         "GRAPHITI_DB_PORT": "6390",
         "GRAPHITI_CONCURRENCY": str(settings.get("GRAPHITI_CONCURRENCY") or 4),
+        "GRAPHITI_EPISODE_WORKERS": str(settings.get("GRAPHITI_EPISODE_WORKERS") or 1),
+        "GRAPHITI_DEDUPE": s("GRAPHITI_DEDUPE") or "exact",
         "GRAPHITI_STATE_DIR": f"{work}/graphiti_state",
         "FLASK_PORT": "5001",
         "FLASK_HOST": "127.0.0.1",

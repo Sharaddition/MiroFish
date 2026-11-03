@@ -29,13 +29,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import threading
 import uuid as uuidlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from zep_cloud import NotFoundError
 
@@ -71,6 +72,11 @@ class GraphitiSettings:
     local_embedding_model: str = "BAAI/bge-small-en-v1.5"
     concurrency: int = 4
     episode_retries: int = 1
+    episode_workers: int = 1
+    dedupe: str = "exact"
+    dedupe_max_calls: int = 50
+    dedupe_auto_score: float = 0.97
+    dedupe_ask_score: float = 0.85
     state_dir: str = ""
 
     @classmethod
@@ -94,6 +100,16 @@ class GraphitiSettings:
                 value = 0
             return value if value > 0 else default
 
+        def score(name: str, default: float) -> float:
+            try:
+                value = float(env.get(name) or default)
+            except ValueError:
+                value = default
+            return value if 0.0 < value <= 1.0 else default
+
+        dedupe_mode = (text("GRAPHITI_DEDUPE", "exact") or "exact").lower()
+        if dedupe_mode not in DEDUPE_MODES:
+            dedupe_mode = "exact"
         retries = (env.get("GRAPHITI_EPISODE_RETRIES") or "").strip()      # 0 is a valid choice: no retry
 
         return cls(
@@ -114,6 +130,11 @@ class GraphitiSettings:
             local_embedding_model=text("GRAPHITI_LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),
             concurrency=number("GRAPHITI_CONCURRENCY", 4),
             episode_retries=int(retries) if retries.isdigit() else 1,
+            episode_workers=number("GRAPHITI_EPISODE_WORKERS", 1),
+            dedupe=dedupe_mode,
+            dedupe_max_calls=number("GRAPHITI_DEDUPE_MAX_CALLS", 50),
+            dedupe_auto_score=score("GRAPHITI_DEDUPE_AUTO_SCORE", 0.97),
+            dedupe_ask_score=score("GRAPHITI_DEDUPE_ASK_SCORE", 0.85),
             state_dir=text("GRAPHITI_STATE_DIR", os.path.join(Config.UPLOAD_FOLDER, "graphiti"))
             or os.path.join(Config.UPLOAD_FOLDER, "graphiti"),
         )
@@ -255,6 +276,118 @@ def sanitize_attributes(response: Any, model: Any) -> Any:
 
 
 # --------------------------------------------------------------------------------------------------
+# duplicate cleanup: planning (pure functions, no database)
+# --------------------------------------------------------------------------------------------------
+
+DEDUPE_MODES = ("off", "exact", "llm")
+
+
+def normalise_name(name: Any) -> str:
+    """Lower case, punctuation gone, spaces collapsed: "Persistent  Systems." and "persistent systems" match."""
+    return " ".join(re.sub(r"[^\w\s]", " ", str(name or "").lower()).split())
+
+
+def _kind(node: Any) -> frozenset:
+    return frozenset(label for label in (getattr(node, "labels", None) or []) if label not in ("Entity", "Episodic"))
+
+
+def _earliest_first(nodes: List[Any]) -> List[Any]:
+    return sorted(nodes, key=lambda n: (str(getattr(n, "created_at", "") or ""), str(getattr(n, "uuid", ""))))
+
+
+def plan_exact_merges(nodes: List[Any]) -> List[Tuple[Any, List[Any]]]:
+    """Groups of nodes with the same normalised name and the same entity type: (node to keep, nodes to merge into it).
+
+    Graphiti labels an entity with one of the ontology's types in some chunks and not in others, so a node without a
+    type joins the typed one of the same name when there is exactly one such type; two different types stay apart.
+    """
+    by_name: Dict[str, Dict[frozenset, List[Any]]] = {}
+    for node in nodes:
+        name = normalise_name(getattr(node, "name", ""))
+        if name:
+            by_name.setdefault(name, {}).setdefault(_kind(node), []).append(node)
+    plan = []
+    for kinds in by_name.values():
+        typed = [k for k in kinds if k]
+        untyped = kinds.get(frozenset(), [])
+        if len(typed) == 1:
+            groups = [kinds[typed[0]] + untyped]
+        else:
+            groups = [kinds[k] for k in typed] + ([untyped] if untyped and not typed else [])
+        for group in groups:
+            if len(group) > 1:
+                ordered = _earliest_first([n for n in group if _kind(n)]) + _earliest_first([n for n in group if not _kind(n)])
+                plan.append((ordered[0], ordered[1:]))
+    return plan
+
+
+def plan_fuzzy_candidates(nodes: List[Any]) -> List[Tuple[Any, Any]]:
+    """Pairs (keep, drop) of the same entity type where one name's words are all inside the other's
+    ("Persistent" / "Persistent Systems"). The longer name is kept. These still need a yes from the model."""
+    by_kind: Dict[frozenset, List[Any]] = {}
+    for node in nodes:
+        if normalise_name(getattr(node, "name", "")):
+            by_kind.setdefault(_kind(node), []).append(node)
+    pairs = []
+    for group in by_kind.values():
+        names = {}
+        for node in group:
+            names.setdefault(normalise_name(node.name), node)           # one representative per distinct name
+        distinct = sorted(names.items(), key=lambda item: -len(item[0].split()))
+        for i, (long_name, long_node) in enumerate(distinct):
+            long_words = set(long_name.split())
+            for short_name, short_node in distinct[i + 1:]:
+                short_words = set(short_name.split())
+                if short_words < long_words and len(short_name) >= 3:
+                    pairs.append((long_node, short_node))
+    return pairs
+
+
+def rank_candidates(nodes: List[Any], vectors: Optional[Dict[str, List[float]]], ask_score: float) -> List[Dict[str, Any]]:
+    """Pairs of different names that may be one entity, closest first: ``{"keep", "drop", "score"}``.
+
+    A pair is a candidate when one name's words are inside the other's, or when the name embeddings are at least
+    ``ask_score`` close (cosine). Pairs are only formed within one entity type. ``vectors`` maps a normalised name to its
+    embedding; without it only the word rule applies and ``score`` is None. The longer name is the one kept.
+    """
+    by_kind: Dict[frozenset, Dict[str, Any]] = {}
+    for node in nodes:
+        name = normalise_name(getattr(node, "name", ""))
+        if name:
+            by_kind.setdefault(_kind(node), {}).setdefault(name, node)       # one representative per distinct name
+    found: Dict[Tuple[str, str, frozenset], Dict[str, Any]] = {}
+
+    def add(kind: frozenset, a: str, b: str, node_a: Any, node_b: Any, score: Optional[float]) -> None:
+        if (len(a.split()), len(a)) < (len(b.split()), len(b)):
+            a, b, node_a, node_b = b, a, node_b, node_a
+        found[(a, b, kind)] = {"keep": node_a, "drop": node_b, "score": score}
+
+    for kind, names in by_kind.items():
+        ordered = sorted(names)
+        if vectors:
+            import numpy as np
+
+            known = [n for n in ordered if n in vectors]
+            if len(known) > 1:
+                matrix = np.array([vectors[n] for n in known], dtype=float)
+                matrix = matrix / np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-12)
+                similarity = matrix @ matrix.T
+                above = (similarity >= ask_score) & np.triu(np.ones(similarity.shape, dtype=bool), k=1)
+                for i, j in zip(*np.where(above)):
+                    add(kind, known[i], known[j], names[known[i]], names[known[j]], float(similarity[i, j]))
+        for keep, drop in plan_fuzzy_candidates(list(names.values())):
+            a, b = normalise_name(keep.name), normalise_name(drop.name)
+            if (a, b, kind) in found or (b, a, kind) in found:
+                continue
+            score = None
+            if vectors and a in vectors and b in vectors:
+                va, vb = np.array(vectors[a], dtype=float), np.array(vectors[b], dtype=float)
+                score = float(va @ vb / max(float(np.linalg.norm(va) * np.linalg.norm(vb)), 1e-12))
+            add(kind, a, b, names[a], names[b], score)
+    return sorted(found.values(), key=lambda c: -(c["score"] if c["score"] is not None else 0.0))
+
+
+# --------------------------------------------------------------------------------------------------
 # Zep-shaped result objects
 # --------------------------------------------------------------------------------------------------
 
@@ -343,9 +476,13 @@ class GraphitiZepClient:
     """What the app sees as ``Zep``: ``client.graph``, ``client.batch``."""
 
     def __init__(self, engine: Any, state_dir: str, loop: Optional[_LoopThread] = None, episode_retries: int = 1,
-                 retry_delay: float = 3.0) -> None:
+                 retry_delay: float = 3.0, episode_workers: int = 1, dedupe: str = "off",
+                 dedupe_max_calls: int = 50, dedupe_auto_score: float = 0.97, dedupe_ask_score: float = 0.85) -> None:
         self._engine = engine
         self._episode_retries, self._retry_delay = max(0, int(episode_retries)), retry_delay
+        self._episode_workers = max(1, int(episode_workers))
+        self._dedupe, self._dedupe_max_calls = dedupe, max(0, int(dedupe_max_calls))
+        self._dedupe_auto_score, self._dedupe_ask_score = dedupe_auto_score, dedupe_ask_score
         self._loop = loop or _LoopThread()
         self._state_dir = Path(state_dir)
         self._lock = threading.RLock()
@@ -406,13 +543,18 @@ class GraphitiZepClient:
     # -- episode queue -------------------------------------------------------------------------------
 
     def _enqueue(self, graph_id: str, job: Callable[[], Awaitable[None]]) -> None:
-        """Run ``job`` after the earlier jobs of the same graph (Graphiti dedupes against what came before)."""
+        """Run ``job`` after the earlier jobs of the same graph (Graphiti dedupes against what came before).
+
+        With ``episode_workers`` above 1, that many chunks of a graph run at once: faster, but chunks that run together
+        cannot see each other's entities yet, so the same entity can end up twice.
+        """
 
         async def put() -> None:
             queue = self._queues.get(graph_id)
             if queue is None:
                 queue = self._queues[graph_id] = asyncio.Queue()
-                self._workers.append(asyncio.ensure_future(self._worker(queue)))
+                for _ in range(self._episode_workers):
+                    self._workers.append(asyncio.ensure_future(self._worker(queue)))
             await queue.put(job)
 
         self._loop.submit(put())
@@ -426,6 +568,91 @@ class GraphitiZepClient:
                 logger.exception("graphiti episode job crashed")
             finally:
                 queue.task_done()
+
+    # -- duplicate cleanup -----------------------------------------------------------------------------
+
+    async def dedupe_graph(self, graph_id: str) -> Dict[str, int]:
+        """Merge entities that are the same thing under one name. Run once the chunks of a build are all in: chunks read
+        at the same time cannot see each other's entities, so each makes its own. Returns what it did."""
+        report = {"nodes": 0, "exact_merged": 0, "fuzzy_merged": 0, "model_calls": 0}
+        if self._dedupe == "off":
+            return report
+        nodes = await self._all_nodes(graph_id)
+        report["nodes"] = len(nodes)
+        for keep, drops in plan_exact_merges(nodes):
+            await self._engine.merge_nodes(graph_id, keep.uuid, [d.uuid for d in drops])
+            report["exact_merged"] += len(drops)
+            logger.info("graphiti dedupe %s: merged %s into %r", graph_id, [d.name for d in drops], keep.name)
+        if self._dedupe == "llm":
+            nodes = await self._all_nodes(graph_id)
+            vectors = await self._name_vectors(nodes)
+            merged_away: set = set()
+            for pair in rank_candidates(nodes, vectors, self._dedupe_ask_score):
+                keep, drop, score = pair["keep"], pair["drop"], pair["score"]
+                if drop.uuid in merged_away or keep.uuid in merged_away:
+                    continue
+                if score is not None and score >= self._dedupe_auto_score:
+                    same = True                    # so close that the model is not asked
+                else:
+                    if report["model_calls"] >= self._dedupe_max_calls:
+                        logger.warning("graphiti dedupe %s: stopped at %d model calls (GRAPHITI_DEDUPE_MAX_CALLS)", graph_id,
+                                       self._dedupe_max_calls)
+                        break
+                    report["model_calls"] += 1
+                    try:
+                        same = await self._engine.same_entity(keep, drop)
+                    except Exception as error:     # one failed judgement leaves that pair unmerged
+                        logger.warning("graphiti dedupe %s: could not judge %r / %r: %s", graph_id, keep.name, drop.name, error)
+                        continue
+                if same:
+                    same_name = [n for n in nodes if normalise_name(n.name) == normalise_name(drop.name) and _kind(n) == _kind(drop)]
+                    await self._engine.merge_nodes(graph_id, keep.uuid, [n.uuid for n in same_name])
+                    merged_away.update(n.uuid for n in same_name)
+                    report["fuzzy_merged"] += len(same_name)
+                    logger.info("graphiti dedupe %s: merged %r into %r (%s)", graph_id, drop.name, keep.name,
+                                "similarity %.3f, no model call" % score if score is not None and score >= self._dedupe_auto_score
+                                else "confirmed by the model" + (", similarity %.3f" % score if score is not None else ""))
+        return report
+
+    async def _name_vectors(self, nodes: List[Any]) -> Optional[Dict[str, List[float]]]:
+        """Embeddings of the distinct node names, by normalised name; None if the embedder fails (word overlap still works)."""
+        names = sorted({normalise_name(n.name) for n in nodes if normalise_name(n.name)})
+        if len(names) < 2:
+            return None
+        try:
+            return dict(zip(names, await self._engine.embed_names(names)))
+        except Exception as error:
+            logger.warning("graphiti dedupe: could not embed the names (%s); using name overlap only", error)
+            return None
+
+    async def _all_nodes(self, graph_id: str) -> List[Any]:
+        nodes: List[Any] = []
+        cursor = None
+        while True:
+            page = await self._engine.list_nodes(graph_id, 200, cursor)
+            nodes.extend(page)
+            if len(page) < 200:
+                return nodes
+            cursor = page[-1].uuid
+
+    def _after_batch(self, graph_ids: Iterable[str], settle: Callable[[], None]) -> None:
+        """Clean up duplicates in the graphs a batch wrote to, then let the batch finish (the app waits for that)."""
+        graphs = sorted({g for g in graph_ids if g})
+        if self._dedupe == "off" or not graphs:
+            settle()
+            return
+
+        async def clean() -> None:
+            try:
+                for graph_id in graphs:
+                    try:
+                        logger.info("graphiti dedupe %s: %s", graph_id, await self.dedupe_graph(graph_id))
+                    except Exception:      # a failed cleanup must never fail the build: the graph is still usable
+                        logger.exception("graphiti dedupe of %s failed; the graph is kept as built", graph_id)
+            finally:
+                settle()
+
+        self._loop.submit(clean())
 
     def _episode_job(
         self,
@@ -458,14 +685,13 @@ class GraphitiZepClient:
                     episode.status, episode.error = "processed", None
                     break
                 except Exception as error:  # noqa: BLE001 - recorded, surfaced by episode.get
-                    episode.status = "failed"
-                    episode.error = f"{type(error).__name__}: {error}"[:500]
-                    if attempt < self._episode_retries:
-                        logger.warning(f"Graphiti episode {episode.uuid} failed ({episode.error}); retrying")
-                        episode.status = "processing"
+                    message = f"{type(error).__name__}: {error}"[:500]
+                    if attempt < self._episode_retries:      # still trying: other threads polling must not see "failed"
+                        logger.warning(f"Graphiti episode {episode.uuid} failed ({message}); retrying")
                         await asyncio.sleep(self._retry_delay)
                     else:
-                        logger.error(f"Graphiti episode {episode.uuid} failed: {episode.error}")
+                        episode.error, episode.status = message, "failed"
+                        logger.error(f"Graphiti episode {episode.uuid} failed: {message}")
             if on_done is not None:
                 on_done(episode)
 
@@ -701,9 +927,13 @@ class _BatchApi:
             item.error = episode.error
             with self._c._lock:
                 remaining["n"] -= 1
-                if remaining["n"] <= 0:
+                done = remaining["n"] <= 0
+            if done:
+                def settle() -> None:
                     failed = sum(1 for i in batch.items if i.status == "failed")
                     batch.status = "succeeded" if not failed else ("failed" if failed == len(batch.items) else "partial")
+
+                self._c._after_batch((i.graph_id for i in batch.items), settle)
 
         if not batch.items:
             batch.status = "succeeded"
@@ -921,6 +1151,97 @@ class GraphitiEngine:
         except Exception:   # a node without edges: Graphiti may raise EdgesNotFoundError
             return []
 
+    async def _fact_embedding(self, edge: Any, driver: Any) -> None:
+        """Saving an edge writes its embedding, and a listed edge does not carry it: read it back (or make it again)."""
+        try:
+            await edge.load_fact_embedding(driver)
+        except Exception:
+            edge.fact_embedding = None
+        if not edge.fact_embedding:
+            await edge.generate_embedding(self.graphiti.embedder)
+
+    async def merge_nodes(self, graph_id: str, keep_uuid: str, drop_uuids: List[str]) -> None:
+        """Make every node in ``drop_uuids`` part of ``keep_uuid``: its facts and episode links move over, then it is deleted."""
+        from graphiti_core.edges import EntityEdge
+        from graphiti_core.nodes import EntityNode
+
+        driver = self._driver_for(graph_id)
+        keep = await EntityNode.get_by_uuid(driver, keep_uuid)
+        for drop_uuid in drop_uuids:
+            if drop_uuid == keep_uuid:
+                continue
+            try:
+                edges = list(await EntityEdge.get_by_node_uuid(driver, drop_uuid))
+            except Exception:       # a node without facts: Graphiti may raise instead of answering empty
+                edges = []
+            for edge in edges:
+                source = keep_uuid if edge.source_node_uuid == drop_uuid else edge.source_node_uuid
+                target = keep_uuid if edge.target_node_uuid == drop_uuid else edge.target_node_uuid
+                await self._fact_embedding(edge, driver)
+                await edge.delete(driver)
+                if source == target:        # a fact between two copies of one entity says nothing once they are one
+                    continue
+                edge.source_node_uuid, edge.target_node_uuid = source, target
+                await edge.save(driver)
+            await driver.execute_query(
+                "MATCH (e:Episodic)-[m:MENTIONS]->(d:Entity {uuid: $drop}) MATCH (k:Entity {uuid: $keep}) "
+                "MERGE (e)-[n:MENTIONS {uuid: m.uuid}]->(k) SET n.group_id = m.group_id, n.created_at = m.created_at",
+                drop=drop_uuid, keep=keep_uuid,
+            )
+            dropped = await EntityNode.get_by_uuid(driver, drop_uuid)
+            if not (keep.summary or "").strip() and (dropped.summary or "").strip():
+                keep.summary = dropped.summary
+                await driver.execute_query("MATCH (k:Entity {uuid: $keep}) SET k.summary = $summary", keep=keep_uuid, summary=keep.summary)
+            await dropped.delete(driver)
+        await self._merge_repeated_facts(driver, keep_uuid)
+
+    async def _merge_repeated_facts(self, driver: Any, node_uuid: str) -> None:
+        """After a merge a node can hold the same fact twice (once from each copy): keep one, with both sets of episodes."""
+        from graphiti_core.edges import EntityEdge
+
+        try:
+            edges = list(await EntityEdge.get_by_node_uuid(driver, node_uuid))
+        except Exception:
+            return
+        seen: Dict[Tuple[str, str, str, str], Any] = {}
+        for edge in sorted(edges, key=lambda e: str(e.created_at or "")):
+            key = (edge.source_node_uuid, edge.target_node_uuid, edge.name, normalise_name(edge.fact))
+            first = seen.setdefault(key, edge)
+            if first is edge:
+                continue
+            first.episodes = list(dict.fromkeys(list(first.episodes or []) + list(edge.episodes or [])))
+            await self._fact_embedding(first, driver)
+            await first.save(driver)
+            await edge.delete(driver)
+
+    async def embed_names(self, names: List[str]) -> List[List[float]]:
+        """Embeddings with the graph's own embedder (the local model by default: no model-provider calls)."""
+        return [list(v) for v in await self.graphiti.embedder.create_batch(list(names))]
+
+    async def same_entity(self, a: Any, b: Any) -> bool:
+        """Ask the graph model whether two nodes are one real-world thing. Conservative: only a clear yes counts."""
+        from graphiti_core.prompts.models import Message
+        from pydantic import BaseModel
+
+        class SameEntity(BaseModel):
+            same: bool
+
+        def describe(node: Any) -> str:
+            kind = ", ".join(sorted(_kind(node))) or "unknown"
+            return f"name: {node.name}" + chr(10) + f"type: {kind}" + chr(10) + f"summary: {(node.summary or '')[:400]}"
+
+        messages = [
+            Message(role="system", content="You decide whether two records in a knowledge graph describe the same real-world "
+                                           "entity. Answer {\"same\": true} only if they are clearly the same thing (one is a "
+                                           "shorter or alternative name for the other). If they could be different "
+                                           "things, answer {\"same\": false}."),
+            Message(role="user", content="Record A:" + chr(10) + describe(a) + chr(10) + chr(10) + "Record B:" + chr(10)
+                    + describe(b) + chr(10) + chr(10) + "Are A and B the same entity?"),
+        ]
+        answer = await self.graphiti.llm_client.generate_response(messages, response_model=SameEntity)
+        value = answer.get("same") if isinstance(answer, dict) else None
+        return value is True or str(value).strip().lower() == "true"
+
     async def close(self) -> None:
         if self.graphiti is not None:
             await self.graphiti.close()
@@ -943,7 +1264,10 @@ def get_graphiti_client() -> GraphitiZepClient:
             loop = _LoopThread()
             engine = GraphitiEngine(settings)
             loop.run(engine.start(), 300)
-            _client = GraphitiZepClient(engine, settings.state_dir, loop, episode_retries=settings.episode_retries)
+            _client = GraphitiZepClient(engine, settings.state_dir, loop, episode_retries=settings.episode_retries,
+                                     episode_workers=settings.episode_workers, dedupe=settings.dedupe,
+                                     dedupe_max_calls=settings.dedupe_max_calls, dedupe_auto_score=settings.dedupe_auto_score,
+                                     dedupe_ask_score=settings.dedupe_ask_score)
             logger.info(
                 f"Graphiti backend ready: db={settings.db_host}:{settings.db_port} llm={settings.llm_model} "
                 f"embedder={'api:' + settings.embedding_model if settings.embedding_base_url else 'local:' + settings.local_embedding_model}"

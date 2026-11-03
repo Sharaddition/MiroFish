@@ -81,6 +81,9 @@ def test_the_old_secret_name_still_works_and_missing_pieces_are_reported():
 def test_run_settings_and_the_dotenv_text():
     env = build_env({**BASE, "LIVE_GRAPH_UPDATES": True, "GRAPHITI_CONCURRENCY": 2}, KEYS, work="/kaggle/working")
     assert env["ZEP_GRAPH_MEMORY_UPDATE"] == "true" and env["GRAPHITI_CONCURRENCY"] == "2" and env["GRAPH_BACKEND"] == "graphiti"
+    assert env["GRAPHITI_EPISODE_WORKERS"] == "1" and env["GRAPHITI_DEDUPE"] == "exact"
+    assert build_env({**BASE, "GRAPHITI_DEDUPE": "llm"}, KEYS, work="/content")["GRAPHITI_DEDUPE"] == "llm"
+    assert build_env({**BASE, "GRAPHITI_EPISODE_WORKERS": 4}, KEYS, work="/content")["GRAPHITI_EPISODE_WORKERS"] == "4"
     assert env["GRAPHITI_STATE_DIR"] == "/kaggle/working/graphiti_state"
     assert build_env(BASE, KEYS, work="/w")["ZEP_GRAPH_MEMORY_UPDATE"] == "false"
     text = to_dotenv({"A": "1", "B": "x y"})

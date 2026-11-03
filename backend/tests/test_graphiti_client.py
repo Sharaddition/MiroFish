@@ -95,6 +95,24 @@ class FakeEngine:
     async def node_edges(self, graph_id, node_uuid):
         return [e for e in self.edges.get(graph_id, []) if node_uuid in (e.source_node_uuid, e.target_node_uuid)]
 
+    async def merge_nodes(self, graph_id, keep_uuid, drop_uuids):
+        self.merges = getattr(self, "merges", []) + [(keep_uuid, list(drop_uuids))]
+        if getattr(self, "merge_error", None):
+            raise self.merge_error
+        self.nodes[graph_id] = [n for n in self.nodes[graph_id] if n.uuid not in drop_uuids]
+
+    async def embed_names(self, names):
+        vectors = getattr(self, "vectors", None)
+        if vectors is None:
+            raise RuntimeError("no embedder")
+        return [vectors[n] for n in names]
+
+    async def same_entity(self, a, b):
+        self.judged = getattr(self, "judged", []) + [(a.name, b.name)]
+        if getattr(self, "judge_error", None):
+            raise self.judge_error
+        return (a.name, b.name) in getattr(self, "same_pairs", set())
+
     async def close(self):
         pass
 
@@ -493,3 +511,164 @@ def test_graphitis_own_answer_that_echoes_the_schema_layout_is_unwrapped():
     fine = {"duplicate_facts": [1], "contradicted_facts": []}
     assert gb.unwrap_layout(fine, EdgeDuplicate) is fine                    # a correct answer is never touched
     assert gb.unwrap_layout({"x": {"y": 1}}, EdgeDuplicate) == {"x": {"y": 1}}
+
+
+def test_several_chunks_of_a_graph_run_at_once_only_when_asked(tmp_path):
+    for workers, expected_peak in [(1, 1), (3, 3)]:
+        engine = FakeEngine(delay=0.15)
+        client = GraphitiZepClient(engine, str(tmp_path / f"w{workers}"), episode_workers=workers)
+        client.graph.create(graph_id="g")
+        episodes = [client.graph.add(graph_id="g", type="text", data=f"chunk {i}") for i in range(6)]
+        assert wait_for(lambda: all(client._episodes[e.uuid_].status == "processed" for e in episodes)), workers
+        assert engine.max_running == expected_peak, workers
+
+
+def test_the_worker_setting_defaults_to_one_and_ignores_nonsense():
+    assert GraphitiSettings.from_env({}).episode_workers == 1
+    assert GraphitiSettings.from_env({"GRAPHITI_EPISODE_WORKERS": "6"}).episode_workers == 6
+    assert GraphitiSettings.from_env({"GRAPHITI_EPISODE_WORKERS": "0"}).episode_workers == 1
+    assert GraphitiSettings.from_env({"GRAPHITI_EPISODE_WORKERS": "many"}).episode_workers == 1
+
+
+def node(uuid, name, kind="Company", created="2026-01-01"):
+    return SimpleNamespace(uuid=uuid, name=name, labels=["Entity", kind] if kind else ["Entity"], summary="", created_at=created)
+
+
+def test_nodes_with_the_same_name_and_type_are_planned_into_one_keeping_the_earliest():
+    nodes = [node("b", "persistent  systems.", created="2026-01-02"), node("a", "Persistent Systems"), node("c", "Persistent Systems", kind="Person"),
+             node("d", "SEBI"), node("e", "Persistent Systems", created="2026-01-03")]
+    plan = gb.plan_exact_merges(nodes)
+    assert [(keep.uuid, sorted(d.uuid for d in drops)) for keep, drops in plan] == [("a", ["b", "e"])]      # the Person is a different thing
+
+
+def test_shorter_names_inside_a_longer_one_become_fuzzy_candidates_within_one_type_only():
+    nodes = [node("1", "Persistent Systems"), node("2", "Persistent"), node("3", "Persistent", kind="Person"), node("4", "SEBI"),
+             node("5", "Systems Ltd")]
+    pairs = [(keep.name, drop.name) for keep, drop in gb.plan_fuzzy_candidates(nodes)]
+    assert pairs == [("Persistent Systems", "Persistent"), ("Persistent Systems", "Systems Ltd")] or pairs == [("Persistent Systems", "Persistent")]
+    assert all(drop.uuid != "3" for _, drop in gb.plan_fuzzy_candidates(nodes))
+
+
+def dedupe_client(tmp_path, engine, mode, **kwargs):
+    return GraphitiZepClient(engine, str(tmp_path / mode), dedupe=mode, **kwargs)
+
+
+def seeded(*nodes):
+    engine = FakeEngine()
+    engine.graphs.add("g")
+    engine.nodes["g"] = list(nodes)
+    return engine
+
+
+def test_exact_mode_merges_repeated_names_and_off_does_nothing(tmp_path):
+    nodes = [node("a", "SEBI"), node("b", "sebi"), node("c", "Nippon")]
+    engine = seeded(*nodes)
+    off = dedupe_client(tmp_path, engine, "off")
+    assert off._call(off.dedupe_graph("g"), 10)["exact_merged"] == 0 and not getattr(engine, "merges", [])
+    client = dedupe_client(tmp_path, engine, "exact")
+    report = client._call(client.dedupe_graph("g"), 10)
+    assert report["exact_merged"] == 1 and report["model_calls"] == 0 and engine.merges == [("a", ["b"])]
+    assert [n.uuid for n in engine.nodes["g"]] == ["a", "c"]
+
+
+def test_llm_mode_merges_only_what_the_model_confirms_and_respects_the_call_cap(tmp_path):
+    nodes = [node("1", "Persistent Systems"), node("2", "Persistent"), node("3", "Nippon Life"), node("4", "Nippon")]
+    engine = seeded(*nodes)
+    engine.same_pairs = {("Persistent Systems", "Persistent")}
+    client = dedupe_client(tmp_path, engine, "llm")
+    report = client._call(client.dedupe_graph("g"), 10)
+    assert report["fuzzy_merged"] == 1 and report["model_calls"] == 2
+    assert sorted(n.uuid for n in engine.nodes["g"]) == ["1", "3", "4"]
+
+    capped_engine = seeded(*[node(str(i), n) for i, n in enumerate(["Persistent Systems", "Persistent", "Nippon Life", "Nippon"])])
+    capped = dedupe_client(tmp_path, capped_engine, "llm", dedupe_max_calls=1)
+    assert capped._call(capped.dedupe_graph("g"), 10)["model_calls"] == 1
+
+
+def test_a_failed_judgement_leaves_that_pair_alone(tmp_path):
+    engine = seeded(node("1", "Persistent Systems"), node("2", "Persistent"))
+    engine.judge_error = RuntimeError("429")
+    client = dedupe_client(tmp_path, engine, "llm")
+    report = client._call(client.dedupe_graph("g"), 10)
+    assert report["fuzzy_merged"] == 0 and len(engine.nodes["g"]) == 2
+
+
+def test_the_batch_finishes_after_the_cleanup_and_a_failing_cleanup_does_not_fail_it(tmp_path):
+    for broken in (False, True):
+        engine = FakeEngine()
+        client = dedupe_client(tmp_path, engine, "exact")
+        client.graph.create(graph_id="g")
+        engine.nodes["g"] = [node("a", "SEBI"), node("b", "SEBI")]
+        if broken:
+            engine.merge_error = RuntimeError("database gone")
+        batch = client.batch.create()
+        client.batch.add(batch.batch_id, [SimpleNamespace(graph_id="g", data="chunk", source_description="s", metadata={})])
+        client.batch.process(batch.batch_id)
+        assert wait_for(lambda: client.batch.get(batch.batch_id).status == "succeeded"), broken
+        assert getattr(engine, "merges", [])[:1] == [("a", ["b"])]
+
+
+def test_the_dedupe_settings_are_parsed_with_safe_defaults():
+    assert GraphitiSettings.from_env({}).dedupe == "exact"
+    assert GraphitiSettings.from_env({"GRAPHITI_DEDUPE": "LLM"}).dedupe == "llm"
+    assert GraphitiSettings.from_env({"GRAPHITI_DEDUPE": "off"}).dedupe == "off"
+    assert GraphitiSettings.from_env({"GRAPHITI_DEDUPE": "aggressive"}).dedupe == "exact"
+    assert GraphitiSettings.from_env({}).dedupe_max_calls == 50
+    assert GraphitiSettings.from_env({"GRAPHITI_DEDUPE_MAX_CALLS": "5"}).dedupe_max_calls == 5
+
+
+def test_an_untyped_node_joins_the_one_typed_node_of_the_same_name_but_two_types_stay_apart():
+    plan = gb.plan_exact_merges([node("a", "SEBI", kind=None), node("b", "SEBI", kind="Regulator", created="2026-01-05")])
+    assert [(k.uuid, [d.uuid for d in drops]) for k, drops in plan] == [("b", ["a"])]      # the typed one survives
+    two = gb.plan_exact_merges([node("a", "Mercury", kind="Planet"), node("b", "Mercury", kind="Company"), node("c", "Mercury", kind=None)])
+    assert two == []                                                                          # ambiguous: leave all three
+
+
+def unit(angle_degrees):
+    import math
+
+    return [math.cos(math.radians(angle_degrees)), math.sin(math.radians(angle_degrees))]
+
+
+def test_embeddings_rank_candidates_by_closeness_within_a_type_and_keep_the_longer_name():
+    nodes = [node("1", "Infosys Limited"), node("2", "Infosys Ltd"), node("3", "Wipro"), node("4", "Infosys Ltd", kind="Person")]
+    vectors = {"infosys limited": unit(0), "infosys ltd": unit(5), "wipro": unit(90)}
+    ranked = gb.rank_candidates(nodes, vectors, 0.85)
+    assert [(c["keep"].name, c["drop"].name) for c in ranked] == [("Infosys Limited", "Infosys Ltd")]
+    assert 0.99 < ranked[0]["score"] < 1.0
+    assert gb.rank_candidates(nodes, None, 0.85) == []                          # no vectors and no shared words: nothing to ask about
+
+
+def test_the_embedding_score_decides_between_merging_asking_and_leaving_alone(tmp_path):
+    nodes = [node("1", "Infosys Limited"), node("2", "Infosys Ltd"),              # 5 degrees apart: ~0.996, merged with no model call
+             node("3", "Tata Motors"), node("4", "Tata Motor Finance"),           # 25 degrees: ~0.906, the model is asked
+             node("5", "Wipro")]                                                  # far from everything: not a candidate
+    engine = seeded(*nodes)
+    engine.vectors = {"infosys limited": unit(0), "infosys ltd": unit(5), "tata motors": unit(100), "tata motor finance": unit(125), "wipro": unit(250)}
+    engine.same_pairs = {("Tata Motor Finance", "Tata Motors")}
+    client = dedupe_client(tmp_path, engine, "llm")
+    report = client._call(client.dedupe_graph("g"), 10)
+    assert report["fuzzy_merged"] == 2 and report["model_calls"] == 1
+    assert engine.judged == [("Tata Motor Finance", "Tata Motors")]
+    assert sorted(n.uuid for n in engine.nodes["g"]) == ["1", "4", "5"]
+
+
+def test_if_the_embedder_fails_the_name_overlap_rule_still_works(tmp_path):
+    engine = seeded(node("1", "Persistent Systems"), node("2", "Persistent"))     # FakeEngine has no vectors: embed_names raises
+    engine.same_pairs = {("Persistent Systems", "Persistent")}
+    client = dedupe_client(tmp_path, engine, "llm")
+    assert client._call(client.dedupe_graph("g"), 10)["fuzzy_merged"] == 1
+
+
+def test_the_score_settings_are_parsed_and_bad_values_fall_back():
+    assert (GraphitiSettings.from_env({}).dedupe_auto_score, GraphitiSettings.from_env({}).dedupe_ask_score) == (0.97, 0.85)
+    got = GraphitiSettings.from_env({"GRAPHITI_DEDUPE_AUTO_SCORE": "0.99", "GRAPHITI_DEDUPE_ASK_SCORE": "0.8"})
+    assert (got.dedupe_auto_score, got.dedupe_ask_score) == (0.99, 0.8)
+    bad = GraphitiSettings.from_env({"GRAPHITI_DEDUPE_AUTO_SCORE": "high", "GRAPHITI_DEDUPE_ASK_SCORE": "7"})
+    assert (bad.dedupe_auto_score, bad.dedupe_ask_score) == (0.97, 0.85)
+
+
+def test_a_zero_threshold_never_pairs_a_name_with_itself():
+    nodes = [node("1", "Infosys Limited"), node("2", "Wipro")]
+    ranked = gb.rank_candidates(nodes, {"infosys limited": unit(0), "wipro": unit(90)}, 0.0)
+    assert [(c["keep"].name, c["drop"].name) for c in ranked] == [("Infosys Limited", "Wipro")]

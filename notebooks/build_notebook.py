@@ -92,7 +92,13 @@ LIVE_GRAPH_UPDATES = False                                   #@param {type:"bool
 # LIVE_GRAPH_UPDATES=True also writes every agent action into the graph as it happens: richer reports, but each
 # action costs extra model calls and the end of the run waits for them. Leave it off for a first run.
 GRAPHITI_CONCURRENCY = 4                                     #@param {type:"integer"}
-# parallel model calls Graphiti makes; lower it (2) if your provider rate-limits you
+# parallel model calls Graphiti makes inside one chunk; lower it (2) if your provider rate-limits you
+GRAPHITI_EPISODE_WORKERS = 4                                 #@param {type:"integer"}
+# how many chunks of the seed Graphiti reads at once. 1 = one at a time (cleanest graph, slowest); 4 is several times
+# faster, but chunks read together cannot see each other's entities, so the same one may appear twice
+GRAPHITI_DEDUPE = "exact"                                    #@param ["off", "exact", "llm"]
+# after the graph is built, merge duplicate entities. exact = same name (no model calls); llm = also names that contain
+# each other ("Persistent" / "Persistent Systems"), each confirmed by the Graphiti model; off = keep the graph as built
 
 # --- any other backend setting, one KEY=VALUE per line (see .env.example). Wins over everything above. -------------------
 # Use NAME=secret:SECRET_NAME to take a key from your Secrets instead of pasting it here.
@@ -203,7 +209,7 @@ env = build_env({k: globals().get(k) for k in (
     "TWITTER_LLM_BASE_URL", "TWITTER_LLM_MODEL_NAME", "REDDIT_LLM_BASE_URL", "REDDIT_LLM_MODEL_NAME",
     "MAIN_LLM_BASE_URL", "MAIN_LLM_MODEL_NAME", "GRAPHITI_LLM_BASE_URL", "GRAPHITI_LLM_MODEL_NAME",
     "TWITTER_RERANKER_BASE_URL", "TWITTER_RERANKER_MODEL_NAME", "EMBEDDING", "EMBEDDING_BASE_URL",
-    "EMBEDDING_MODEL_NAME", "EMBEDDING_DIM", "LIVE_GRAPH_UPDATES", "GRAPHITI_CONCURRENCY")}, KEYS, work=WORK)
+    "EMBEDDING_MODEL_NAME", "EMBEDDING_DIM", "LIVE_GRAPH_UPDATES", "GRAPHITI_CONCURRENCY", "GRAPHITI_EPISODE_WORKERS", "GRAPHITI_DEDUPE")}, KEYS, work=WORK)
 for warning in merge_extra_env(env, parse_extra_env(EXTRA_ENV, secret)):
     print("EXTRA_ENV:", warning)
 with open(f"{REPO}/.env", "w") as f:
@@ -328,7 +334,7 @@ md("""
 | Step 3 fails in `pip`/`uv` | Internet is off (Kaggle: Settings → Internet on). Re-run the cell. |
 | Smoke test `[FAIL] ... 401` | The key in Secrets is wrong or not shared with this notebook (`TWITTER_LLM_API_KEY`, or the job's own `<JOB>_API_KEY`). |
 | Smoke test `[FAIL] ... json` | The model cannot give structured output. Set `GRAPHITI_LLM_MODEL_NAME` to a stronger model. |
-| Graph step is very slow or stalls | Rate limits. Lower `GRAPHITI_CONCURRENCY` to 2, or use a faster model for Graphiti. |
+| Graph step is very slow or stalls | Rate limits. Lower `GRAPHITI_CONCURRENCY` to 2, or use a faster model for Graphiti. Raise `GRAPHITI_EPISODE_WORKERS` to read more chunks at once if your provider allows. |
 | `6b` finishes but the graph is nearly empty | The model returned no entities: use a stronger `GRAPHITI_LLM_MODEL_NAME`. |
 | Backend did not come up | Read `logs/backend.log` in the file panel. |
 | Session disconnected mid-run | Re-run steps 2 to 4; the simulation can be resumed from the web API (`/api/simulation/resume`). |
