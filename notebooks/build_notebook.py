@@ -282,6 +282,11 @@ code('''
 graph_id = mf.build_graph(project_id)
 ''')
 code('''
+# 6b+. Look at the graph: a summary, the facts, a picture, and graph.html (interactive) in the results folder.
+# Optional. If it looks too thin, change the settings and re-run 6b before going on.
+mf.show_graph(graph_id, out_dir=f"{WORK}/mirofish_results")
+''')
+code('''
 # 6c. One persona per entity in the graph, plus the simulation settings
 simulation_id = mf.create_and_prepare(project_id, graph_id)
 ''')

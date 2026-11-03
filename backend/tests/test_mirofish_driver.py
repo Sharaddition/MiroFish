@@ -147,3 +147,55 @@ def test_report_waits_then_downloads_the_markdown(monkeypatch):
     })
     assert mf.report("sim_1", allow_partial_graph=True) == "# Report\n\nBody"
     assert mf.http.calls[0][2]["json"] == {"simulation_id": "sim_1", "force_regenerate": True, "allow_partial_graph": True}
+
+
+GRAPH = {
+    "nodes": [
+        {"uuid": "a", "name": "SEBI", "labels": ["Entity", "Regulator"], "summary": "Market regulator </script>"},
+        {"uuid": "b", "name": "Persistent Systems", "labels": ["Entity", "ListedCompany"], "summary": ""},
+        {"uuid": "c", "name": "Lonely", "labels": ["Entity"], "summary": ""},
+    ],
+    "edges": [{"uuid": "e1", "name": "REGULATES", "fact": "SEBI reviewed the placement", "source_node_uuid": "a",
+               "target_node_uuid": "b", "source_node_name": "SEBI", "target_node_name": "Persistent Systems"}],
+}
+
+
+def test_the_summary_lists_types_hubs_and_facts():
+    text = md.graph_summary(GRAPH)
+    assert "3 entities, 1 facts" in text and "Regulator" in text and "ListedCompany" in text
+    assert "SEBI -[REGULATES]-> Persistent Systems: SEBI reviewed the placement" in text
+    assert "Lonely" not in text.split("Most connected:")[1].split("Facts")[0]       # an entity with no facts is not a hub
+    assert "0 facts" in md.graph_summary({"nodes": [], "edges": []})
+
+
+def test_the_interactive_page_carries_the_data_and_cannot_be_broken_by_a_summary():
+    import json
+    import re
+
+    page = md.graph_html(GRAPH)
+    assert "vis-network" in page and "SEBI reviewed the placement" in page
+    assert page.count("</script>") == 2                      # the library tag and ours; the one inside a summary is escaped
+    data = json.loads(re.search(r"const d = (.*?);\nnew vis", page, re.S).group(1))
+    assert len(data["nodes"]) == 3 and data["edges"][0]["from"] == "a"
+
+
+def test_show_graph_prints_draws_and_saves_files(tmp_path, capsys, monkeypatch):
+    drawn = []
+    monkeypatch.setattr(md, "draw_graph", lambda data, limit: drawn.append((len(data["nodes"]), limit)))
+    mf = driver({("GET", "/api/graph/data/g1"): [ok(GRAPH)]})
+    path = mf.show_graph("g1", out_dir=str(tmp_path / "out"))
+    assert drawn == [(3, 150)] and path.endswith("graph.html")
+    assert (tmp_path / "out" / "graph.html").read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert '"SEBI"' in (tmp_path / "out" / "graph.json").read_text(encoding="utf-8")
+    assert "3 entities, 1 facts" in capsys.readouterr().out
+    assert driver({("GET", "/api/graph/data/g1"): [ok(GRAPH)]}).show_graph("g1") is None      # nothing saved without a folder
+
+
+def test_the_picture_is_drawn_when_matplotlib_and_networkx_exist():
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("networkx")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    md.draw_graph(GRAPH)
+    md.draw_graph({"nodes": [], "edges": []})

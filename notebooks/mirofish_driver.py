@@ -10,11 +10,14 @@ error text when a stage fails.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
+
+from graph_view import draw_graph, graph_html, graph_summary
 
 TERMINAL_RUN = {"completed", "stopped", "failed"}
 
@@ -91,6 +94,29 @@ class MiroFish:
             counts = "node and edge counts unavailable"
         self.log(f"graph {graph_id}: {counts}")
         return graph_id
+
+    def graph_data(self, graph_id: str) -> Dict[str, Any]:
+        return self._call("GET", f"/api/graph/data/{graph_id}", timeout=300)
+
+    def show_graph(self, graph_id: str, out_dir: Optional[str] = None, facts: int = 25, max_drawn: int = 150) -> Optional[str]:
+        """Look at the knowledge graph: a summary, the facts and a picture. With ``out_dir`` it also saves ``graph.html``
+        (interactive, open it in a browser) and ``graph.json`` there."""
+        data = self.graph_data(graph_id)
+        print(graph_summary(data, facts))
+        try:
+            draw_graph(data, max_drawn)
+        except ImportError:
+            print("(no picture: matplotlib / networkx are not installed here)")
+        if not out_dir:
+            return None
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "graph.html")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(graph_html(data))
+        with open(os.path.join(out_dir, "graph.json"), "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=1, default=str)
+        print("saved", path, "(open it in a browser for the interactive graph)")
+        return path
 
     def _wait_task(self, path: str, label: str, timeout: float, poll: float = 5) -> Dict[str, Any]:
         deadline, last = time.time() + timeout, None
