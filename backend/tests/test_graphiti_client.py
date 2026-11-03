@@ -672,3 +672,12 @@ def test_a_zero_threshold_never_pairs_a_name_with_itself():
     nodes = [node("1", "Infosys Limited"), node("2", "Wipro")]
     ranked = gb.rank_candidates(nodes, {"infosys limited": unit(0), "wipro": unit(90)}, 0.0)
     assert [(c["keep"].name, c["drop"].name) for c in ranked] == [("Infosys Limited", "Wipro")]
+
+
+def test_text_after_the_first_json_value_is_dropped_and_other_text_is_left_alone():
+    nl = chr(10)
+    assert json.loads(gb.first_json_value('{"a": 1}' + nl + '{"b": 2}')) == {"a": 1}
+    assert json.loads(gb.first_json_value('  {"a": {"b": [1, 2]}}' + nl + nl + "Hope this helps!")) == {"a": {"b": [1, 2]}}
+    assert gb.first_json_value('{"a": 1}') == '{"a": 1}'
+    assert gb.first_json_value("not json at all") == "not json at all"        # the caller reports the original error
+    assert gb.first_json_value("") == ""

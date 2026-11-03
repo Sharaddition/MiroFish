@@ -242,6 +242,21 @@ def _as_text(value: Any) -> Optional[str]:
     return str(value)
 
 
+def first_json_value(text: str) -> str:
+    """The first complete JSON value in ``text``, dropping anything after it.
+
+    Some models add a second object or a closing remark after the answer ("Extra data: line 3 column 1"), which makes a
+    plain ``json.loads`` fail although the answer itself is fine. Text that does not start with JSON is returned as it
+    was, so the caller still reports the original problem.
+    """
+    stripped = text.lstrip()
+    try:
+        _, end = json.JSONDecoder().raw_decode(stripped)
+    except ValueError:
+        return text
+    return stripped[:end]
+
+
 def unwrap_layout(response: Any, model: Any) -> Any:
     """An answer that echoes the schema's layout (``{"properties": {...}}``) is reduced to the inner object.
 
@@ -1002,6 +1017,9 @@ class GraphitiEngine:
 
         class OpenAIGenericClient(_GenericClient):
             """Graphiti's OpenAI-compatible client, with the attribute answers made safe to store (see sanitize_attributes) and echoed schema layouts unwrapped."""
+
+            def _strip_code_fences(self, text):
+                return first_json_value(super()._strip_code_fences(text))
 
             async def generate_response(self, messages, response_model=None, *args, **kwargs):
                 result = await super().generate_response(messages, response_model, *args, **kwargs)
