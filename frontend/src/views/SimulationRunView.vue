@@ -263,7 +263,7 @@ const loadGraph = async (graphId) => {
   }
   
   try {
-    const res = await getGraphData(graphId)
+    const res = await getGraphData(graphId, (seconds) => addLog(t('log.zepRateLimited', { seconds })))
     if (res.success) {
       graphData.value = res.data
       if (!isSimulating.value) {

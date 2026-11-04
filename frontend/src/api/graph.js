@@ -43,14 +43,29 @@ export function getTaskStatus(taskId) {
 
 /**
  * 获取图谱数据
+ * Zep's FREE plan allows only a few requests per minute. When the backend answers "zep_rate_limited", wait the time
+ * it names and ask again (up to 4 times); `onWait(seconds)` lets the page say so instead of showing an empty graph.
  * @param {String} graphId - 图谱ID
+ * @param {Function} [onWait] - called with the seconds about to be waited
  * @returns {Promise}
  */
-export function getGraphData(graphId) {
-  return service({
-    url: `/api/graph/data/${graphId}`,
-    method: 'get'
-  })
+export async function getGraphData(graphId, onWait) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await service({
+        url: `/api/graph/data/${graphId}`,
+        method: 'get'
+      })
+    } catch (error) {
+      const body = error.response?.data
+      if (error.response?.status !== 429 || body?.error_code !== 'zep_rate_limited' || attempt >= 4) {
+        throw error
+      }
+      const seconds = Math.min(Math.max(Number(body.retry_after_seconds) || 30, 1), 90)
+      if (onWait) onWait(seconds)
+      await new Promise(resolve => setTimeout(resolve, seconds * 1000))
+    }
+  }
 }
 
 /**

@@ -797,7 +797,7 @@ class GraphBuilderService:
             entity_types=list(entity_types)
         )
     
-    def get_graph_data(self, graph_id: str) -> Dict[str, Any]:
+    def get_graph_data(self, graph_id: str, max_retries: Optional[int] = None) -> Dict[str, Any]:
         """
         获取完整图谱数据（包含详细信息）
         
@@ -807,8 +807,9 @@ class GraphBuilderService:
         Returns:
             包含nodes和edges的字典，包括时间信息、属性等详细数据
         """
-        nodes = fetch_all_nodes(self.client, graph_id)
-        edges = fetch_all_edges(self.client, graph_id)
+        retries = {} if max_retries is None else {"max_retries": max_retries}
+        nodes = fetch_all_nodes(self.client, graph_id, **retries)
+        edges = fetch_all_edges(self.client, graph_id, **retries)
 
         # 创建节点映射用于获取节点名称
         node_map = {}

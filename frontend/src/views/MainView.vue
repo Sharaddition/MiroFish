@@ -316,7 +316,7 @@ const fetchGraphData = async () => {
     // Refresh project info to check for graph_id
     const projRes = await getProject(currentProjectId.value)
     if (projRes.success && projRes.data.graph_id) {
-      const gRes = await getGraphData(projRes.data.graph_id)
+      const gRes = await getGraphData(projRes.data.graph_id, (seconds) => addLog(t('log.zepRateLimited', { seconds })))
       if (gRes.success) {
         graphData.value = gRes.data
         const nodeCount = gRes.data.node_count || gRes.data.nodes?.length || 0
@@ -374,7 +374,7 @@ const loadGraph = async (graphId) => {
   graphLoading.value = true
   addLog(`Loading full graph data: ${graphId}`)
   try {
-    const res = await getGraphData(graphId)
+    const res = await getGraphData(graphId, (seconds) => addLog(t('log.zepRateLimited', { seconds })))
     if (res.success) {
       graphData.value = res.data
       addLog('Graph data loaded successfully.')

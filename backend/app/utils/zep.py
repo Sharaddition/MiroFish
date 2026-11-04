@@ -159,6 +159,55 @@ def _retry_after_seconds(error: BaseException) -> float | None:
         return None
 
 
+def _header(error: BaseException, name: str) -> str | None:
+    headers = getattr(error, "headers", None)
+    if not headers:
+        return None
+    return next((str(v) for k, v in headers.items() if str(k).lower() == name), None)
+
+
+def rate_limit_reset_seconds(error: BaseException, now: Callable[[], float] | None = None) -> float | None:
+    """Seconds until Zep's rate-limit window resets, from ``x-ratelimit-reset`` (an epoch time), for a 429.
+
+    The FREE plan answers 429 with ``retry-after: 0`` and ``x-ratelimit-remaining: 0``: retrying at once is refused
+    again, so the reset time is the only honest wait. ``None`` when the error carries no usable reset header.
+    """
+
+    if not isinstance(error, ZepApiError) or error.status_code != 429:
+        return None
+    try:
+        reset = float(_header(error, "x-ratelimit-reset") or "")
+    except ValueError:
+        return None
+    # one extra second: the window opens at the reset second, and clocks differ a little
+    return max(0.0, reset - (now or time.time)()) + 1.0
+
+
+def retry_delay_seconds(
+    error: BaseException,
+    attempt: int,
+    initial_delay: float,
+    max_delay: float,
+    now: Callable[[], float] | None = None,
+) -> float:
+    """How long to wait before retrying ``error``: Zep's ``retry-after`` when it is positive, else the rate-limit
+    window's reset, else exponential backoff. Capped at ``max_delay``."""
+
+    retry_after = _retry_after_seconds(error)
+    if retry_after is not None and retry_after > 0:
+        wait = retry_after
+    else:
+        wait = rate_limit_reset_seconds(error, now)
+        if wait is None:
+            wait = initial_delay * (2 ** (attempt - 1))
+    return min(wait, max_delay)
+
+
+def _describe(error: BaseException) -> str:
+    status = getattr(error, "status_code", None)
+    return f"{type(error).__name__} {status}" if status else type(error).__name__
+
+
 def call_zep_read_with_retry(
     operation: Callable[[], T],
     *,
@@ -180,17 +229,13 @@ def call_zep_read_with_retry(
             if attempt == max_attempts or not is_retryable_zep_error(error):
                 raise
 
-            retry_after = _retry_after_seconds(error)
-            delay = min(
-                retry_after if retry_after is not None else initial_delay * (2 ** (attempt - 1)),
-                max_delay,
-            )
+            delay = retry_delay_seconds(error, attempt, initial_delay, max_delay)
             logger.warning(
                 "Zep %s attempt %s/%s failed (%s); retrying in %.1fs",
                 operation_name,
                 attempt,
                 max_attempts,
-                type(error).__name__,
+                _describe(error),
                 delay,
             )
             sleep(delay)
@@ -227,11 +272,7 @@ def call_zep_write_with_pre_rejection_retry(
             if deadline is not None and time.time() >= deadline:
                 raise
 
-            retry_after = _retry_after_seconds(error)
-            delay = min(
-                retry_after if retry_after is not None else initial_delay * (2 ** (attempt - 1)),
-                max_delay,
-            )
+            delay = retry_delay_seconds(error, attempt, initial_delay, max_delay)
             if deadline is not None:
                 delay = min(delay, max(0.0, deadline - time.time()))
             logger.warning(
@@ -240,7 +281,7 @@ def call_zep_write_with_pre_rejection_retry(
                 operation_name,
                 attempt,
                 max_attempts,
-                type(error).__name__,
+                _describe(error),
                 delay,
             )
             sleep(delay)

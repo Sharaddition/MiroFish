@@ -26,6 +26,7 @@ from ..services.simulation_manager import SimulationManager
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..services.zep_graph_memory_updater import ZepGraphMemoryManager
 from ..utils.llm_client import LLMResponseError
+from ..utils.zep import ZepApiError, rate_limit_reset_seconds
 
 # 获取日志器
 logger = get_logger('mirofish.api')
@@ -876,10 +877,36 @@ def list_tasks():
 
 # ============== 图谱数据接口 ==============
 
+# The graph panel and every page that shows it ask for the same graph, and a Zep FREE plan allows only a handful of
+# requests per minute (each graph load is several). Answers are kept briefly and shared between concurrent callers.
+GRAPH_DATA_CACHE_SECONDS = 15.0
+_graph_data_cache: dict = {}
+_graph_data_locks: dict = {}
+_graph_data_guard = threading.Lock()
+
+
+def _cached_graph_data(graph_id: str, load):
+    """``load()``'s result for ``graph_id``, reused for GRAPH_DATA_CACHE_SECONDS; one caller loads while others wait."""
+    import time as _time
+
+    with _graph_data_guard:
+        lock = _graph_data_locks.setdefault(graph_id, threading.Lock())
+    with lock:
+        hit = _graph_data_cache.get(graph_id)
+        if hit and _time.monotonic() - hit[0] < GRAPH_DATA_CACHE_SECONDS:
+            return hit[1]
+        data = load()
+        _graph_data_cache[graph_id] = (_time.monotonic(), data)
+        return data
+
+
 @graph_bp.route('/data/<graph_id>', methods=['GET'])
 def get_graph_data(graph_id: str):
     """
     获取图谱数据（节点和边）
+
+    Zep rate limiting answers 429 with ``error_code`` ``zep_rate_limited`` and ``retry_after_seconds`` (a fast failure:
+    the page waits and asks again, instead of this request holding on for minutes).
     """
     try:
         if not Config.ZEP_API_KEY:
@@ -887,15 +914,29 @@ def get_graph_data(graph_id: str):
                 "success": False,
                 "error": t('api.zepApiKeyMissing')
             }), 500
-        
+
         builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
-        graph_data = builder.get_graph_data(graph_id)
-        
+        graph_data = _cached_graph_data(graph_id, lambda: builder.get_graph_data(graph_id, max_retries=1))
+
         return jsonify({
             "success": True,
             "data": graph_data
         })
-        
+
+    except ZepApiError as e:
+        if e.status_code == 429:
+            wait = int(round(rate_limit_reset_seconds(e) or 30))
+            return jsonify({
+                "success": False,
+                "error": t('api.zepRateLimited', seconds=wait),
+                "error_code": "zep_rate_limited",
+                "retry_after_seconds": wait,
+            }), 429
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
     except Exception as e:
         return jsonify({
             "success": False,

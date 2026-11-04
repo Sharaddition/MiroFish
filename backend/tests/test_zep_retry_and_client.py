@@ -156,3 +156,35 @@ def test_zep_timeout_policy_is_not_exposed_in_env_example():
 
     assert "ZEP_REQUEST_TIMEOUT_SECONDS" not in contents
     assert "ZEP_INGESTION_TIMEOUT_SECONDS" not in contents
+
+
+FREE_PLAN_429 = {"retry-after": "0", "x-ratelimit-limit": "5", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1000"}
+
+
+def test_a_429_with_retry_after_zero_waits_for_the_ratelimit_reset():
+    error = ZepApiError(status_code=429, headers=FREE_PLAN_429, body="Rate limit exceeded for FREE plan")
+    assert zep.rate_limit_reset_seconds(error, now=lambda: 960.0) == 41.0
+    assert zep.retry_delay_seconds(error, 1, 2.0, 60.0, now=lambda: 960.0) == 41.0
+    assert zep.retry_delay_seconds(error, 1, 2.0, 30.0, now=lambda: 900.0) == 30.0       # capped
+
+
+def test_a_positive_retry_after_still_wins_and_other_errors_back_off():
+    positive = ZepApiError(status_code=429, headers={**FREE_PLAN_429, "retry-after": "7"}, body="x")
+    assert zep.retry_delay_seconds(positive, 1, 2.0, 60.0, now=lambda: 960.0) == 7.0
+    assert zep.rate_limit_reset_seconds(ZepApiError(status_code=500, headers=FREE_PLAN_429, body="x")) is None
+    assert zep.rate_limit_reset_seconds(ZepApiError(status_code=429, headers={}, body="x")) is None
+    assert zep.retry_delay_seconds(ZepApiError(status_code=503, body="x"), 3, 2.0, 60.0) == 8.0
+
+
+def test_a_read_retry_sleeps_until_the_window_resets(monkeypatch):
+    monkeypatch.setattr(zep.time, "time", lambda: 960.0)
+    calls, sleeps = [], []
+
+    def operation():
+        calls.append(True)
+        if len(calls) == 1:
+            raise ZepApiError(status_code=429, headers=FREE_PLAN_429, body="Rate limit exceeded")
+        return "ok"
+
+    assert zep.call_zep_read_with_retry(operation, operation_name="read", sleep=sleeps.append) == "ok"
+    assert sleeps == [41.0]
