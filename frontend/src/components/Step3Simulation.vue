@@ -119,6 +119,7 @@
       </div>
     </div>
 
+    <p v-if="!ensembleMode && runFinishing && !offerResume" class="control-note" role="status">{{ $t('step3.finishingNote') }}</p>
     <p v-if="!ensembleMode && runStatus.graph_sync_pending" class="control-note" role="status">{{ $t('step3.graphSyncNote') }}</p>
     <p v-if="!ensembleMode && isPaused" class="control-note" role="status">{{ $t('step3.pausedNote') }}</p>
     <p v-if="!ensembleMode && isWinding" class="control-note" role="status">{{ runStatus.process_alive === false ? $t('step3.stoppingZepNote') : $t('step3.stoppingNote') }}</p>
@@ -399,9 +400,12 @@ const isStopping = ref(false)
 const resumeInfo = ref(null)
 const isResuming = ref(false)
 const resumeError = ref('')
+// phase 2 = the run ended (stopped, or every round played but Zep still busy): a stopped run can be continued from there too
 const offerResume = computed(() => (
-  !ensembleMode.value && phase.value === 0 && !isStarting.value && !!resumeInfo.value?.resumable
+  !ensembleMode.value && [0, 2].includes(phase.value) && !isStarting.value && !!resumeInfo.value?.resumable
 ))
+// The run has progress but its Zep writer is still open, so it cannot be resumed yet -- and must not be started over
+const runFinishing = ref(false)
 const startError = ref(null)
 const runStatus = ref({})
 // The process is working (or finishing up): the live status line and the failure banner only matter then
@@ -478,8 +482,10 @@ const loadResumeInfo = async () => {
   try {
     const res = await getResumeInfo(props.simulationId)
     resumeInfo.value = res.success && res.data?.resumable ? res.data : null
+    runFinishing.value = !!(res.success && res.data?.finishing)
   } catch (err) {
     resumeInfo.value = null
+    runFinishing.value = false
   }
   return resumeInfo.value
 }
@@ -635,7 +641,8 @@ const doRetryGraphSync = async () => {
     addLog(t('log.graphSyncRetryFailed', { error: err.message }))
   } finally {
     isRetryingSync.value = false
-    fetchRunStatus()
+    await fetchRunStatus()
+    await loadResumeInfo()   // once Zep has finished, the run can usually be resumed
   }
 }
 
@@ -900,6 +907,10 @@ onMounted(async () => {
     const info = await loadResumeInfo()
     if (info) {
       addLog(t('resume.logOffer', { round: info.round }))
+    } else if (runFinishing.value) {
+      // Opening this page must never start over a run that has progress: show where it stands instead
+      addLog(t('log.runFinishingNotStarting'))
+      await fetchRunStatus()
     } else {
       doStartSimulation()
     }

@@ -730,7 +730,7 @@ class SimulationRunner:
         """
         info: Dict[str, Any] = {
             "resumable": False, "reason": None, "round": None, "rounds": {}, "total_rounds": None, "exact": None,
-            "memory": None,
+            "memory": None, "finishing": False,
         }
         state = cls.get_run_state(simulation_id)
         if state is None or state.runner_status == RunnerStatus.IDLE:
@@ -745,6 +745,7 @@ class SimulationRunner:
             return info
         if ZepGraphMemoryManager.get_updater(simulation_id) is not None:
             info["reason"] = "the run is still finishing"
+            info["finishing"] = True   # its Zep writer is still open: the page must not start the run over meanwhile
             return info
         if state.seed is None:
             info["reason"] = "the run's seed was not recorded, so its scheduling cannot be replayed"

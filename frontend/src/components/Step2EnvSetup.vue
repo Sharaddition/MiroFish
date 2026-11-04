@@ -820,6 +820,10 @@ const addLog = (msg) => {
   emit('add-log', msg)
 }
 
+// The simulation's status/error also carry what happened to a later RUN (e.g. Zep still ingesting after it ended), so
+// they only mean "setup failed" while there is no finished config: a run that failed must not hide its setup.
+const setupFailed = (state) => !(state.config_generated && state.config) && (state.status === 'failed' || !!state.error)
+
 const handlePrepareFailure = (message) => {
   stopPolling()
   stopProfilesPolling()
@@ -1087,7 +1091,7 @@ const fetchConfigRealtime = async () => {
     if (res.success && res.data) {
       const data = res.data
 
-      if (data.status === 'failed' || data.error) {
+      if (setupFailed(data)) {
         handlePrepareFailure(data.error)
         return
       }
@@ -1153,7 +1157,7 @@ const loadPreparedData = async () => {
     if (res.success && res.data) {
       const configState = res.data
 
-      if (configState.status === 'failed' || configState.error) {
+      if (setupFailed(configState)) {
         handlePrepareFailure(configState.error)
         return
       }
