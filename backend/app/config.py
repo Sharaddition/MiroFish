@@ -55,6 +55,29 @@ class Config:
             }
         return {"api_key": cls.LLM_API_KEY, "base_url": cls.LLM_BASE_URL, "model_name": cls.LLM_MODEL_NAME}
 
+    @classmethod
+    def fallback_llm(cls, primary: dict | None = None) -> dict | None:
+        """The one-shot backup for a failed preparation/report call, or None.
+
+        The dedicated ``LLM_FALLBACK_*`` model when its key and model are set (base URL defaults to ``LLM_BASE_URL``),
+        else the Twitter model (``LLM_*``) when the preparation model is a separate one. ``LLM_FALLBACK=false`` turns
+        it off, and a backup identical to the primary is no backup.
+        """
+        if os.environ.get('LLM_FALLBACK', 'true').strip().lower() in ('false', '0', 'no', 'off'):
+            return None
+        primary = primary or cls.prep_llm()
+        key, model = os.environ.get('LLM_FALLBACK_API_KEY'), os.environ.get('LLM_FALLBACK_MODEL_NAME')
+        if key and model:
+            backup = {"api_key": key, "base_url": os.environ.get('LLM_FALLBACK_BASE_URL') or cls.LLM_BASE_URL,
+                      "model_name": model}
+        else:
+            backup = {"api_key": cls.LLM_API_KEY, "base_url": cls.LLM_BASE_URL, "model_name": cls.LLM_MODEL_NAME}
+        if not backup["api_key"] or not backup["model_name"]:
+            return None
+        if (backup["base_url"], backup["model_name"]) == (primary["base_url"], primary["model_name"]):
+            return None
+        return backup
+
     # Zep配置
     # 'zep' (Zep Cloud, the default) or 'graphiti' (self-hosted Graphiti + FalkorDB; see app/utils/graphiti_backend.py)
     GRAPH_BACKEND = (os.environ.get('GRAPH_BACKEND') or 'zep').strip().lower()

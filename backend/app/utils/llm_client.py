@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from typing import Optional, Dict, Any, List
+import openai
 from openai import OpenAI
 
 from ..config import Config
@@ -98,14 +99,30 @@ def _contains_additional_json_container(content: str) -> bool:
     return False
 
 
+def should_fall_back(error: BaseException) -> bool:
+    """Whether another model could succeed where this call failed: no quota (402), rate limit (429), a rejected key,
+    a server error (5xx), a timeout, a dropped connection, or a request too large for this model (413).
+
+    A malformed request (400) or an unusable answer would fail the same way on any model, so those do not count.
+    """
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int):
+        return status in (402, 408, 413, 429, 401, 403) or status >= 500
+    return isinstance(error, (openai.APITimeoutError, openai.APIConnectionError, TimeoutError, ConnectionError))
+
+
 class LLMClient:
     """LLM客户端"""
+
+    fallback: Optional[Dict[str, str]] = None   # see __init__; class defaults keep clients built without __init__ working
+    _fallback_client: Any = None
     
     def __init__(
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        fallback: Optional[Dict[str, str]] = None,
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
@@ -118,16 +135,22 @@ class LLMClient:
             api_key=self.api_key,
             base_url=self.base_url
         )
+        # a backup model ({"api_key", "base_url", "model_name"}) tried once when a call fails in a way another model could cure
+        self.fallback = fallback
+        self._fallback_client: Any = None
 
     @classmethod
     def for_preparation(cls) -> "LLMClient":
         """The client for the stronger model that prepares a simulation and writes its report.
 
-        It is ``LLM_PREP_*`` when that is configured (key and model name), else the main ``LLM_*`` model, so
-        installations without a separate model are unaffected.
+        It is ``LLM_PREP_*`` (``MAIN_LLM_*``) when that is configured (key and model name), else the Twitter ``LLM_*`` model.
+        A call that fails for a reason another model could cure is retried once on ``Config.fallback_llm()``.
         """
         prep = Config.prep_llm()
-        return cls(api_key=prep["api_key"], base_url=prep["base_url"], model=prep["model_name"])
+        return cls(
+            api_key=prep["api_key"], base_url=prep["base_url"], model=prep["model_name"],
+            fallback=Config.fallback_llm(prep),
+        )
 
     def _create_completion(
         self,
@@ -139,14 +162,26 @@ class LLMClient:
     ) -> Any:
         """Send one raw Chat Completions request through the compatibility layer."""
 
-        return create_chat_completion(
-            self.client,
-            model=self.model,
+        request = dict(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=response_format,
         )
+        try:
+            return create_chat_completion(self.client, model=self.model, **request)
+        except Exception as error:
+            if not self.fallback or not should_fall_back(error):
+                raise
+            if self._fallback_client is None:
+                self._fallback_client = OpenAI(
+                    api_key=self.fallback["api_key"], base_url=self.fallback["base_url"]
+                )
+            logger.warning(
+                "LLM %s failed (%s: %s); retrying once on the backup model %s",
+                self.model, type(error).__name__, str(error)[:160], self.fallback["model_name"],
+            )
+            return create_chat_completion(self._fallback_client, model=self.fallback["model_name"], **request)
     
     def chat(
         self,
